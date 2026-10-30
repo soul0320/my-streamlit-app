@@ -7,9 +7,9 @@ from openai import OpenAI
 client = OpenAI()
 
 # 페이지 설정
-st.set_page_config(page_title="     ", page_icon="  ")
-st.title("     ")
-st.write("     ")
+st.set_page_config(page_title="한영 번역기", page_icon="🌐")
+st.title("🌐 한영 번역기")
+st.write("한글 문장을 입력하면 자연스러운 영어로 번역해 드립니다.")
 
 # 사용자 입력(텍스트)
 korean_text = st.text_area(
@@ -19,17 +19,17 @@ korean_text = st.text_area(
 )
 
 # 번역 버튼
-if st.button("     "):
+if st.button("번역하기"):
 
     if not korean_text.strip():
-        st.warning("     ")
+        st.warning("번역할 한글 문장을 입력해주세요.")
     else:
         with st.spinner("번역 중입니다..."):
 
             # 시스템 역할
             sys_role = """
-
-
+            당신은 한국어를 자연스럽고 유창한 영어로 번역하는 전문 번역가입니다.
+            원문의 뉘앙스를 살려 문맥에 가장 적절한 영어 문장만 출력하세요.
             """
 
             # 프롬프트 구성
@@ -39,17 +39,17 @@ if st.button("     "):
             {korean_text}
             """
 
-            # GPT 호출
+            # GPT 호출 (교안의 client.responses.create 규격)
             response = client.responses.create(
                 model="gpt-4o-mini",
                 input=[
-                    {"role": "system", "content":    },
-                    {"role": "user", "content":    }
+                    {"role": "system", "content": sys_role},
+                    {"role": "user", "content": prompt}
                 ]
             )
 
             # 결과 출력
-            translated_text =
+            translated_text = response.output_text
 
-            st.subheader("     ")
-            st.success(     )
+            st.subheader("번역 결과")
+            st.success(translated_text)
