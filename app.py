@@ -9,7 +9,7 @@ client = OpenAI()
 
 # 페이지 설정
 st.set_page_config(page_title="텍스트 음성 변환", page_icon="🔊")
-st.title("🔊 텍스트 음성 변환 서비스")
+st.title("🔊 텍스트 → 음성 변환 서비스")
 
 # 텍스트 입력
 text = st.text_area(
