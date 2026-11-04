@@ -20,7 +20,7 @@ IMAGE_PATH = "able.png"
 
 # 사이드바 메뉴 (아래 셀들도 이 이름으로 화면을 나눔)
 PAGES = ["🎙️ AI 비서", "📊 업무 우선순위 분석", "📅 마감 캘린더", "📨 팔로업 메일", "🎧 출근길 브리핑",
-         "🍃 오늘의 할 일", 🗄️ 회의록 아카이브]
+         "🍃 오늘의 할 일", "🗄️ 회의록 아카이브"]
 
 # 대화 기록 최대 개수 (질문 1 + 답변 1 = 2개 → 10이면 최근 5번의 대화)
 MAX_HISTORY = 10
@@ -376,7 +376,7 @@ if page == PAGES[0]:
         current_history = st.session_state.messages_dict.setdefault(st.session_state.active_doc, [])
         with st.container(height=480, border=True):
             if not current_history:
-                st.caption("(f"'{st.session_state.active_doc}'에 대한 첫 대화를 시작해 보세요.")
+                st.caption(f"'{st.session_state.active_doc}'에 대한 첫 대화를 시작해 보세요.")
             for message in current_history:
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
@@ -516,7 +516,7 @@ elif page == PAGES[1]:
                         text={"format": priority_schema},   # 정해진 JSON 형식으로만 답변
                         temperature=0
                     )
-                    data = json.loads(res.output_text)   # JSON 문자열 → 딕셔너리
+                    data = json.loads(response.output_text)   # JSON 문자열 → 딕셔너리
                     st.session_state[f"priority_data_{st.session_state.active_doc}"] = data # 주석 추가가ㅏㅏ
             except Exception as e:
                 st.error(f"분석 오류: {e}")
@@ -655,9 +655,9 @@ def kst_today():
     return datetime.now(ZoneInfo("Asia/Seoul")).date()
 
 # ── ① 일정 추출용 출력 스키마 (05 실습 JSON 구조화) ──
-    schedule_schema = {
-        "type": "json_schema",
-        "name": "schedule",
+schedule_schema = {
+    "type": "json_schema",
+    "name": "schedule",
         "schema": {
             "type": "object",
             "properties": {
@@ -830,7 +830,7 @@ elif page == PAGES[2]:
                                               value=st.session_state.cal_base)
     base_day = st.session_state.cal_base
 
-    if c2.button("f"🔍 '{st.session_state.active_doc}'에서 일정 추출", type="primary", width="stretch"):
+    if c2.button("🔍 회의록에서 일정 추출", type="primary", use_container_width=True):
         if not current_meeting:
             st.warning("먼저 사이드바에서 회의록 파일을 업로드해 주세요.")
         else:
@@ -860,9 +860,6 @@ elif page == PAGES[2]:
                         if expr and re.search(r"\d+\s*(주|일)\s*전", expr):
                             days = None
                         due = calc_due(base_day, expr, days) or (base_day + timedelta(days=7))
-                        schedule.append({"name": item["일정명"], "kind": kind, "expr": expr,
-                                         "due": due or base_day + timedelta(days=7),
-                        
                         if (name, due) not in existing_keys:
                             st.session_state.schedule.append({
                                 "name": name, "kind": kind, "expr": expr, "due": due,
