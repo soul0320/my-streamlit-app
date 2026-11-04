@@ -498,7 +498,7 @@ elif page == PAGES[1]:
 [회의록]
 {meeting}
 """
-    def classify(urgent, important):
+def classify(urgent, important):
         if urgent == "높음" and important == "높음": return "즉시 착수"
         elif important == "높음": return "순차 진행"
         else: return "위임 검토"
@@ -521,59 +521,60 @@ elif page == PAGES[1]:
             except Exception as e:
                 st.error(f"분석 오류: {e}")
 
-                # ── ① 업무 집중도 (R&R 밸런스) ──────────
-            pdata = st.session_state.get(f"priority_data_{st.session_state.active_doc}")
-            if pdata:
-                df_people = pd.DataFrame(data["참석자별업무"])
-                kim = df_people[df_people["이름"].str.contains("김")]["업무수"].sum() if not df_people.empty else 0
-                total = df_people["업무수"].sum() if not df_people.empty else 1
+    # ── ① 업무 집중도 (R&R 밸런스) ──────────
+    pdata = st.session_state.get(f"priority_data_{st.session_state.active_doc}")
+    if pdata:
+        try:
+            df_people = pd.DataFrame(pdata["참석자별업무"])
+            kim = df_people[df_people["이름"].str.contains("김")]["업무수"].sum() if not df_people.empty else 0
+            total = df_people["업무수"].sum() if not df_people.empty else 1
 
-                st.markdown("#### ⚖️ 업무 집중도")
-                col1, col2 = st.columns(2)
-                col1.metric("김 대리 배정 업무", f"{kim}건")
-                col2.metric("전체 배정 업무 중 비중",
-                            f"{kim / total * 100:.0f}%" if total else "-") # if total else 삭제할까 말까...?)
+            st.markdown("#### ⚖️ 업무 집중도")
+            col1, col2 = st.columns(2)
+            col1.metric("김 대리 배정 업무", f"{kim}건")
+            col2.metric("전체 배정 업무 중 비중",
+                        f"{kim / total * 100:.0f}%" if total else "-") # if total else 삭제할까 말까...?
 
-                # 김 대리 업무가 3건 이상이거나 절반 이상이면 경보
-                if kim >= 3 or (total and kim / total >= 0.5):
-                    st.error("🚨 김 대리에게 업무가 집중되어 있습니다. 우선순위와 위임을 검토하세요.")
-                else:
-                    st.success("업무 배분이 적정한 수준입니다.")
+            # 김 대리 업무가 3건 이상이거나 절반 이상이면 경보
+            if kim >= 3 or (total and kim / total >= 0.5):
+                st.error("🚨 김 대리에게 업무가 집중되어 있습니다. 우선순위와 위임을 검토하세요.")
+            else:
+                st.success("업무 배분이 적정한 수준입니다.")
 
-                st.bar_chart(df_people.set_index("이름")["업무수"])
+            st.bar_chart(df_people.set_index("이름")["업무수"])
 
-                # ── ② 우선순위 매트릭스 ──────────────────
-                df_task = pd.DataFrame(data["업무목록"])
-                df_task["기한"] = df_task["기한"].fillna("기한 미정").replace("null", "기한 미정")
-                df_task["분류"] = df_task.apply(
-                    lambda r: classify(r["긴급도"], r["중요도"]), axis=1)
+            # ── ② 우선순위 매트릭스 ──────────────────
+            df_task = pd.DataFrame(pdata["업무목록"])
+            df_task["기한"] = df_task["기한"].fillna("기한 미정").replace("null", "기한 미정")
+            df_task["분류"] = df_task.apply(
+                lambda r: classify(r["긴급도"], r["중요도"]), axis=1)
 
-                st.markdown("#### 🗂️ 우선순위 가이드")
-                cols = st.columns(3)
-                for col, group, icon in zip(cols,
-                                            ["즉시 착수", "순차 진행", "위임 검토"],
-                                            ["🔴", "🟡", "🔵"]):
-                    col.markdown(f"**{icon} {group}**")
-                    tasks = df_task[df_task["분류"] == group]
-                    if tasks.empty:
-                        col.caption("해당 업무 없음")
-                    for _, t in tasks.iterrows():
-                        col.info(f"**{t['업무명']}**\n\n⏰ {t['기한']}")
+            st.markdown("#### 🗂️ 우선순위 가이드")
+            cols = st.columns(3)
+            for col, group, icon in zip(cols,
+                                        ["즉시 착수", "순차 진행", "위임 검토"],
+                                        ["🔴", "🟡", "🔵"]):
+                col.markdown(f"**{icon} {group}**")
+                tasks = df_task[df_task["분류"] == group]
+                if tasks.empty:
+                    col.caption("해당 업무 없음")
+                for _, t in tasks.iterrows():
+                    col.info(f"**{t['업무명']}**\n\n⏰ {t['기한']}")
 
-                # ── ③ 상세 분석 표 ───────────────────────
-                st.markdown("#### 📋 상세 분석 표")
-                st.dataframe(df_task[["분류", "업무명", "기한", "긴급도", "중요도", "근거"]],
-                             column_config={
-                                 "근거": st.column_config.TextColumn("분석 근거 및 배경", width="large"),
-                                 "업무명": st.column_config.TextColumn("배정 업무명", width="medium")
-                             },
-                            use_container_width=True,
-                            hide_index=True
-                )
-                st.caption("※ 중요도는 회의 내용을 바탕으로 한 에이블의 판단입니다.")
+            # ── ③ 상세 분석 표 ───────────────────────
+            st.markdown("#### 📋 상세 분석 표")
+            st.dataframe(df_task[["분류", "업무명", "기한", "긴급도", "중요도", "근거"]],
+                         column_config={
+                             "근거": st.column_config.TextColumn("분석 근거 및 배경", width="large"),
+                             "업무명": st.column_config.TextColumn("배정 업무명", width="medium")
+                         },
+                         use_container_width=True,
+                         hide_index=True
+            )
+            st.caption("※ 중요도는 회의 내용을 바탕으로 한 에이블의 판단입니다.")
 
-            except Exception as e:
-                st.error(f"오류가 발생했습니다: {e}")
+        except Exception as e:
+            st.error(f"오류가 발생했습니다: {e}")
 
                             
     # ── ④ 시각화 대시보드: 지출 내역 & 목표 진행 상황] ──
