@@ -64,6 +64,79 @@ with st.sidebar:
         "회의록(.txt) 또는 녹음 파일(.m4a, .mp3, .wav)",
         type=["txt", "m4a", "mp3", "wav"]
     )
+    # ============================================================
+# 웹 브라우저 실시간 음성 녹음 및 STT
+# ============================================================
+# 기능:
+# 1. 웹 브라우저에서 마이크로 직접 녹음
+# 2. 녹음 종료 후 OpenAI Whisper API 호출
+# 3. 음성을 텍스트로 자동 변환
+# 4. 변환 결과 확인 및 회의록 분석에 활용
+# ============================================================
+
+st.markdown("---")
+
+st.subheader("🎙️ 실시간 음성 녹음")
+
+st.caption(
+    "마이크 버튼을 누르고 녹음하세요. "
+    "녹음이 끝나면 자동으로 텍스트로 변환합니다."
+)
+
+# 1. Streamlit 내장 마이크 녹음 기능
+recorded_audio = st.audio_input(
+    "회의 내용 또는 음성 명령 녹음",
+    sample_rate=16000
+)
+
+# 2. 녹음 파일이 있는 경우
+if recorded_audio is not None:
+
+    audio_bytes = recorded_audio.getvalue()
+
+    # 동일한 녹음을 반복 변환하지 않도록 상태 관리
+    if st.session_state.get("last_audio") != audio_bytes:
+
+        with st.spinner("🎙️ 음성을 텍스트로 변환하고 있습니다..."):
+
+            try:
+
+                # 3. OpenAI STT API 호출
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=(
+                        "recording.wav",
+                        audio_bytes,
+                        "audio/wav"
+                    )
+                )
+
+                # 4. 변환 결과 저장
+                st.session_state["live_transcript"] = transcript.text
+                st.session_state["last_audio"] = audio_bytes
+
+            except Exception as e:
+
+                st.error(f"음성 인식 오류: {e}")
+
+    # 5. 변환된 텍스트 화면 표시
+    if st.session_state.get("live_transcript"):
+
+        st.success("✅ 음성 인식 완료!")
+
+        st.text_area(
+            "음성 인식 결과",
+            value=st.session_state["live_transcript"],
+            height=150
+        )
+
+        # 6. TXT 파일 다운로드
+        st.download_button(
+            "📄 변환된 TXT 다운로드",
+            data=st.session_state["live_transcript"],
+            file_name="meeting_transcript.txt",
+            mime="text/plain"
+        )
 
     meeting_content = ""
     if uploaded_file is not None:
@@ -88,6 +161,19 @@ with st.sidebar:
 st.header("KT 마케팅 전속 비서 서비스 '에이블'")
 st.markdown("김 대리의 업무 부담을 최소화하는 **온톨로지 관계망 기반 선제적 에이전트**")
 
+# ============================================================
+# 실시간 녹음 결과를 회의록 분석 데이터에 연결
+# ============================================================
+# 업로드한 파일이 없을 경우,
+# 웹에서 녹음한 텍스트를 회의록으로 사용합니다.
+# ============================================================
+
+if not meeting_content:
+
+    meeting_content = st.session_state.get(
+        "live_transcript",
+        ""
+    )
 if not meeting_content:
     st.warning("👈 사이드바에서 회의록 또는 녹음 파일을 먼저 업로드해 주세요.")
     st.stop()
@@ -103,6 +189,11 @@ def analyze_meeting_ontology(raw_text):
     prompt = f"""
     당신은 KT 마케팅팀 김 대리의 전속 AI 개인비서 '에이블'입니다.
     다음 회의록의 온톨로지 관계망 [참석자 ↔ 배정업무 ↔ 마감일 ↔ 선행 요청자료 ↔ 리스크]을 분석해 JSON 포맷으로 정확히 출력하세요.
+    [마감일 추출 원칙]
+    1. 회의록에 명시된 마감일만 확정 마감일로 추출합니다.
+    2. 회의록에 마감일이 없으면 deadline을 null로 반환합니다.
+    3. 회의 날짜를 마감일로 잘못 인식하지 않습니다.
+    4. AI가 임의로 마감일을 생성하지 않습니다.
 
     회의록:
     {raw_text}
@@ -114,7 +205,7 @@ def analyze_meeting_ontology(raw_text):
       "kim_tasks": [
         {{
           "task_name": "업무명",
-          "deadline": "YYYY-MM-DD",
+          "deadline": "YYYY-MM-DD 또는 null",
           "urgency": "High 또는 Low",
           "importance": "High 또는 Low",
           "eisenhower_category": "DO FIRST / SCHEDULE / DELEGATE 중 택 1",
@@ -158,7 +249,7 @@ tabs = st.tabs([
     "📅 스마트 캘린더 등록",
     "✉️ 팔로업 메일 초안·발송",
     "🎙️ 1분 출근길 오디오 브리핑",
-    "🔍 시니어 전략 진단 (Devil's Advocate)"
+    "🔍 마케팅 전략 보고서"
 ])
 
 # 탭 1: 회의록 요약 및 R&R 아이젠하워 매트릭스
@@ -185,41 +276,151 @@ with tabs[0]:
                 st.caption(f"기한: {task.get('deadline', '미정')} | 긴급도: {task.get('urgency')} | 중요도: {task.get('importance')}")
                 st.write(task.get("action_guide"))
 
-# 탭 2: 마감 역산 캘린더링 (Google Calendar 연동)
-with tabs[1]:
-    st.subheader("📅 마감 기한 역산 기반 자동 마일스톤 생성")
-    st.write("회의록상 마감일을 기준으로 D-7(착수), D-3(중간점검), D-Day(보고) 일정을 자동 계산하여 등록합니다.")
+# ============================================================
+# 탭 2. 마감 기한 역산 기반 자동 마일스톤 생성
+# ============================================================
+# 기능:
+# 1. 회의록에서 추출한 김 대리의 담당 업무 확인
+# 2. 실제 마감일을 기준으로 D-7, D-3, D-Day 계산
+# 3. 마감일이 없는 경우 임의 날짜 생성 방지
+# 4. 필요 시 사용자가 마감일 직접 수정
+# 5. Google Calendar 일정 등록 링크 생성
+# ============================================================
 
-    for task in analysis_data.get("kim_tasks", []):
-        t_name = task["task_name"]
-        deadline = task.get("deadline", "2026-11-15")
+with tabs[1]:
+
+    st.subheader("📅 마감 기한 역산 기반 자동 마일스톤 생성")
+
+    st.write(
+        "회의록상 마감일을 기준으로 "
+        "D-7(착수), D-3(중간점검), D-Day(보고) "
+        "일정을 자동 계산하여 등록합니다."
+    )
+
+    # 김 대리에게 배정된 업무 목록
+    tasks = analysis_data.get("kim_tasks", [])
+
+    for idx, task in enumerate(tasks):
+
+        # 1. 업무명 및 기존 마감일 확인
+        t_name = task.get("task_name", "업무명 미정")
+        deadline_str = task.get("deadline")
 
         st.markdown(f"#### 🎯 과제: {t_name}")
-        c1, c2, c3 = st.columns(3)
 
-        # 가상 마일스톤 계산
-        start_d7 = f"{deadline}T09:00:00"
-        end_d7 = f"{deadline}T10:00:00"
+        # 2. AI가 추출한 마감일의 유효성 검증
+        try:
+            deadline = datetime.strptime(
+                deadline_str,
+                "%Y-%m-%d"
+            ).date()
 
-        with c1:
-            st.markdown(f"**[D-7] 착수/자료수집**\n\n{deadline}")
-            if st.button(f"캘린더 등록 (D-7)", key=f"cal_d7_{t_name}"):
-                res = create_calendar_event(f"[착수] {t_name}", start_d7, end_d7, "에이블 비서 자동 스케줄링")
-                st.success("등록 링크 생성 완료!")
-                st.markdown(f"[👉 구글 캘린더에서 확인하기]({res.get('htmlLink', res.get('link'))})")
-        with c2:
-            st.markdown(f"**[D-3] 중간 점검**\n\n{deadline}")
-            if st.button(f"캘린더 등록 (D-3)", key=f"cal_d3_{t_name}"):
-                res = create_calendar_event(f"[중간점검] {t_name}", start_d7, end_d7, "초안 검토 및 피드백")
-                st.success("등록 링크 생성 완료!")
-                st.markdown(f"[👉 구글 캘린더에서 확인하기]({res.get('htmlLink', res.get('link'))})")
-        with c3:
-            st.markdown(f"**[D-Day] 최종 마감**\n\n{deadline}")
-            if st.button(f"캘린더 등록 (D-Day)", key=f"cal_dday_{t_name}"):
-                res = create_calendar_event(f"[마감] {t_name} 최종 보고", start_d7, end_d7, "팀장님 대면 보고")
-                st.success("등록 링크 생성 완료!")
-                st.markdown(f"[👉 구글 캘린더에서 확인하기]({res.get('htmlLink', res.get('link'))})")
-        st.markdown("---")
+        except (ValueError, TypeError):
+            deadline = None
+
+        # 3. 마감일이 없는 경우 사용자 입력 요청
+        if deadline is None:
+
+            st.warning(
+                "⚠️ 회의록에서 유효한 마감일을 "
+                "확인하지 못했습니다."
+            )
+
+            deadline = st.date_input(
+                "업무 마감일을 직접 설정하세요.",
+                value=None,
+                key=f"deadline_{idx}"
+            )
+
+        else:
+
+            # AI가 추출한 마감일도 사용자가 수정할 수 있음
+            deadline = st.date_input(
+                "업무 마감일 확인 및 수정",
+                value=deadline,
+                key=f"deadline_{idx}"
+            )
+
+        # 마감일이 없으면 캘린더 생성 중단
+        if deadline is None:
+            st.info("마감일을 설정하면 일정이 자동 계산됩니다.")
+            st.divider()
+            continue
+
+        # 4. 실제 마감일 기준 역산
+        d7 = deadline - timedelta(days=7)
+        d3 = deadline - timedelta(days=3)
+        dday = deadline
+
+        # 5. 캘린더에 전달할 시작 및 종료 시간 생성
+        # 기본 일정 시간은 오전 9시~10시로 설정
+        def make_calendar_time(date_value):
+
+            start = f"{date_value}T09:00:00"
+            end = f"{date_value}T10:00:00"
+
+            return start, end
+
+        # 6. 마일스톤별 화면 구성
+        milestones = [
+            ("D-7", "착수/자료수집", d7),
+            ("D-3", "중간 점검", d3),
+            ("D-Day", "최종 마감", dday)
+        ]
+
+        cols = st.columns(3)
+
+        for col, milestone in zip(cols, milestones):
+
+            label, title, date_value = milestone
+
+            with col:
+
+                st.markdown(f"**[{label}] {title}**")
+
+                # 정확하게 계산된 날짜 표시
+                st.write(date_value.strftime("%Y-%m-%d"))
+
+                # 캘린더 일정 시작 및 종료 시간
+                start_time, end_time = make_calendar_time(
+                    date_value
+                )
+
+                # 캘린더 등록 버튼
+                if st.button(
+                    f"캘린더 등록 ({label})",
+                    key=f"calendar_{idx}_{label}"
+                ):
+
+                    result = create_calendar_event(
+                        f"[{title}] {t_name}",
+                        start_time,
+                        end_time,
+                        f"에이블 AI 비서 자동 생성 일정: {t_name}"
+                    )
+
+                    # 생성된 캘린더 링크 확인
+                    calendar_link = result.get(
+                        "htmlLink",
+                        result.get("link")
+                    )
+
+                    if calendar_link:
+
+                        st.success("✅ 일정 등록 링크 생성 완료")
+
+                        st.markdown(
+                            f"[👉 Google Calendar에서 등록하기]"
+                            f"({calendar_link})"
+                        )
+
+                    else:
+
+                        st.error(
+                            "캘린더 링크를 생성하지 못했습니다."
+                        )
+
+        st.divider()
 
 # 탭 3: 팔로업 이메일 초안 생성 및 수정 발송
 with tabs[2]:
@@ -263,20 +464,210 @@ with tabs[3]:
             )
             st.audio(speech.content, format="audio/mp3")
 
-# 탭 5: 시니어 마케터 리스크 진단 (Devil's Advocate)
+# ============================================================
+# 탭 5. AI 마케팅 전략 보고서 작성 및 이메일 발송
+# ============================================================
+# 기능:
+# 1. 회의록 기반 마케팅 전략 보고서 초안 생성
+# 2. 핵심 결정사항 및 담당 업무 포함
+# 3. 리스크와 대응방안 분석
+# 4. 사용자가 보고서 내용을 직접 수정
+# 5. 최종 검토 후 이메일 발송
+# ============================================================
+
 with tabs[4]:
-    st.subheader("🔍 신제품 런칭 리스크 진단 (Devil's Advocate)")
-    st.caption("50년 차 마케팅 베테랑의 안목으로 회의 중 통과된 계획의 숨은 결함을 선제 점검합니다.")
 
-    da = analysis_data.get("devils_advocate", {})
-    st.markdown(f"**📋 회의에서 합의된 낙관적 계획:**\n> {da.get('optimistic_plan', 'SNS 인플루언서 집중 홍보')}")
+    st.subheader("📑 AI 마케팅 전략 보고서 작성")
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.markdown("#### ⚠️ 포착된 잠재 리스크 (결함)")
-        for risk in da.get("potential_risks", []):
-            st.error(f"• {risk}")
+    st.caption(
+        "회의록을 기반으로 보고서 초안을 생성하고, "
+        "내용을 수정한 뒤 이메일로 발송할 수 있습니다."
+    )
 
-    with col_b:
-        st.markdown("#### 💡 베테랑 마케터의 방어 논리 & 플랜 B")
-        st.success(da.get("senior_advice", "단일 채널 몰아주기보다는 CVR 검증을 위한 A/B 테스트 분산 집행 권고"))
+    # 1. 보고서 초안 저장 공간
+    if "marketing_report" not in st.session_state:
+
+        st.session_state.marketing_report = ""
+
+    # 회의록이 변경되면 기존 보고서와 구분
+    import hashlib
+
+    meeting_id = hashlib.sha256(
+        clean_meeting_text.encode("utf-8")
+    ).hexdigest()
+
+    if st.session_state.get("report_meeting_id") != meeting_id:
+
+        st.session_state.report_meeting_id = meeting_id
+        st.session_state.marketing_report = ""
+
+    # 2. 보고서 작성 버튼
+    if st.button(
+        "📝 마케팅 전략 보고서 초안 생성",
+        type="primary"
+    ):
+
+        with st.spinner(
+            "에이블이 마케팅 전략 보고서를 작성하고 있습니다..."
+        ):
+
+            try:
+
+                report_prompt = f"""
+                당신은 마케팅팀의 시니어 전략 기획 비서입니다.
+
+                아래 회의록을 분석하여 실무에서 활용할 수 있는
+                마케팅 전략 보고서 초안을 작성하세요.
+
+                [보고서 구성]
+
+                1. 보고서 제목
+
+                2. Executive Summary
+                - 핵심 내용 요약
+                - 주요 결정 사항
+
+                3. 시장 및 경쟁 환경 분석
+                - 경쟁사 현황
+                - 주요 시사점
+
+                4. 마케팅 실행 전략
+                - 타깃 고객
+                - 콘텐츠 전략
+                - 채널 운영 방향
+
+                5. 업무 추진 계획
+                - 담당자
+                - 수행 업무
+                - 마감일
+                - 선행 협업사항
+
+                6. 주요 리스크 및 대응방안
+                - 예상 위험요인
+                - 대응방안
+                - 추가 검토 필요사항
+
+                7. 향후 실행 계획 및 의사결정 요청사항
+
+                [작성 원칙]
+                - 전문적인 비즈니스 보고서 문체를 사용합니다.
+                - 실제 회의록에 나온 정보만 확정 사실로 작성합니다.
+                - 회의록에 없는 수치나 일정은 만들어내지 않습니다.
+                - AI가 제안하는 전략은 'AI 제안'으로 표시합니다.
+                - 사용자가 수정하기 쉬운 문단 형태로 작성합니다.
+                - 작성된 보고서는 최종 승인 전 초안입니다.
+
+                [회의록]
+                {clean_meeting_text[:30000]}
+                """
+
+                response = client.responses.create(
+                    model="gpt-4o-mini",
+                    input=report_prompt
+                )
+
+                # 생성한 보고서 저장
+                st.session_state.marketing_report = (
+                    response.output_text
+                )
+
+                st.success("✅ 보고서 초안 생성 완료!")
+
+            except Exception as e:
+
+                st.error(
+                    f"보고서 생성 오류: {e}"
+                )
+
+    # 3. 보고서 수정 및 이메일 전송
+    if st.session_state.marketing_report:
+
+        st.markdown("---")
+
+        st.subheader("✏️ 보고서 검토 및 수정")
+
+        # 사용자가 직접 보고서 내용 수정
+        edited_report = st.text_area(
+            "보고서 본문",
+            value=st.session_state.marketing_report,
+            height=500,
+            key=f"edited_marketing_report_{meeting_id}"
+        )
+
+        st.caption(
+            "AI가 작성한 초안입니다. "
+            "내용을 검토하고 수정한 뒤 발송하세요."
+        )
+
+        # 4. 보고서 TXT 다운로드
+        st.download_button(
+            "📄 보고서 TXT 다운로드",
+            data=edited_report,
+            file_name="marketing_strategy_report.txt",
+            mime="text/plain"
+        )
+
+        st.markdown("---")
+
+        # 5. 이메일 전송 기능
+        st.subheader("✉️ 보고서 이메일 발송")
+
+        with st.form("report_email_form"):
+
+            recipient = st.text_input(
+                "수신자 이메일 주소"
+            )
+
+            subject = st.text_input(
+                "이메일 제목",
+                value="[마케팅팀] 전략 보고서 초안 공유"
+            )
+
+            st.info(
+                "위에서 수정한 보고서가 이메일 본문으로 전송됩니다."
+            )
+
+            # 사용자 확인 후에만 전송
+            confirm = st.checkbox(
+                "보고서 내용과 수신자 주소를 확인했습니다."
+            )
+
+            submitted = st.form_submit_button(
+                "✉️ 최종 보고서 이메일 발송"
+            )
+
+            if submitted:
+
+                if not recipient:
+
+                    st.warning(
+                        "수신자 이메일 주소를 입력해 주세요."
+                    )
+
+                elif not confirm:
+
+                    st.warning(
+                        "이메일 발송 전 확인란에 체크해 주세요."
+                    )
+
+                else:
+
+                    # 기존 이메일 발송 함수 재사용
+                    result = send_email(
+                        recipient,
+                        subject,
+                        edited_report
+                    )
+
+                    if result.get("status") == "success":
+
+                        st.success(
+                            "✅ 보고서 이메일 발송 완료!"
+                        )
+
+                    else:
+
+                        st.error(
+                            f"이메일 발송 실패: "
+                            f"{result.get('error')}"
+                        )
