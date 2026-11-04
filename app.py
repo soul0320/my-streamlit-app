@@ -307,11 +307,17 @@ with st.sidebar:
                 st.session_state.uploaded_docs[uf.name] = content
                 st.session_state.active_doc = uf.name
                 # 아카이브에 날짜/시간별로 누적 저장 (삭제해도 아카이브에는 계속 남음!)
-                st.session_state.archived_meetings.append({
-                    "time": kst_now_str(),
-                    "title": uf.name,
-                    "content": content
-                })
+                # 동일 문서 중복 저장 방지
+              # 파일명만 비교하지 않고 실제 문서 내용을 기준으로 확인
+# 수정 : 들여쓰기 괜찮?
+import hashlib
+
+def get_document_hash(content):
+
+    return hashlib.sha256(
+        content.encode("utf-8")
+    ).hexdigest()
+    
         st.success(f"{len(uploaded_files)}개 파일 로드 완료!")
 
     st.markdown("#### 📑 등록된 문서 목록")
@@ -868,7 +874,7 @@ elif page == PAGES[2]:
 
                         # AI가 추출한 일정명을 변수에 저장
                         name = item["일정명"]
-                        
+
                         # "null" 글자도 기한 없음으로 처리
                         expr = item["기한표현"] if item["기한표현"] not in (None, "", "null") else None
                         days = item["기한일수"]
@@ -1008,6 +1014,54 @@ elif page == PAGES[2]:
                                type="primary", use_container_width=True)
             st.caption(f"마일스톤 {len(rows)}개(D-14, D-7, D-1, D-day)가 담깁니다. "
                        "파일을 열면 Google·Outlook·휴대폰 캘린더에 바로 등록됩니다.")
+# ============================================================
+# 외부 캘린더 바로가기
+# ============================================================
+# 기능:
+# 1. Google Calendar 바로 열기
+# 2. Outlook Calendar 바로 열기
+# 3. 휴대폰 캘린더 등록 방법 안내
+#
+# 주의:
+# 아래 버튼은 캘린더 웹페이지를 여는 기능입니다.
+# 일정 자동 등록 및 수정 동기화 기능은 아닙니다.
+# ============================================================
+
+st.markdown("#### 🔗 외부 캘린더 바로가기")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.link_button(
+        "🔵 Google Calendar 열기",
+        "https://calendar.google.com/calendar/u/0/r",
+        use_container_width=True
+    )
+
+with col2:
+    st.link_button(
+        "🟣 Outlook Calendar 열기",
+        "https://outlook.live.com/calendar/",
+        use_container_width=True
+    )
+
+# 휴대폰 캘린더 등록 안내
+with st.expander("📱 휴대폰 캘린더 등록 방법"):
+
+    st.markdown("""
+    **iPhone**
+    - ICS 파일을 다운로드합니다.
+    - 파일을 열어 캘린더로 가져올 수 있는지 확인합니다.
+    - 지원되지 않는 경우 연결된 캘린더 서비스에서 가져옵니다.
+
+    **Android**
+    - Google Calendar 웹에서 ICS 파일을 가져옵니다.
+    - 휴대폰에서 같은 Google 계정으로 동기화합니다.
+
+    ※ 기기와 캘린더 앱에 따라 가져오기 방법이 다를 수 있습니다.
+    """)
+
+# 수정 : 삭제해야 하는지 모르겠슨..
         else:
             st.info("달력에 표시할 일정을 체크하면 캘린더 파일을 받을 수 있습니다.")
 
@@ -1219,12 +1273,74 @@ elif page == PAGES[4]:
         else:
             try:
                 with st.spinner("브리핑 원고를 쓰고 있습니다.."):
-                    response = client.responses.create(
-                        model="gpt-4o-mini",
-                        input=[{"role": "system", "content": "김 대리의 비서 에이블로서 출근길 1분 라디오 뉴스 브리핑을 350자 내외로 정중하고 또렷하게 작성하세요."},
-                               {"role": "user", "content": f"[회의록]\n{current_meeting}"}],
-                        temperature=0
-                    )
+                  # 수정 : 들여쓰기 검증해야함.
+# ============================================================
+# 출근길 브리핑 원고 생성
+# ============================================================
+# 작성 기준:
+# 1. 공영방송 뉴스 원고에 준하는 정확한 한국어 문장
+# 2. 표준어 규정 및 한글 맞춤법 준수
+# 3. 숫자·날짜·범위 표현의 정확성 검토
+# 4. 음성으로 읽기 자연스러운 문장 구성
+# 5. 회의록에 없는 정보 생성 금지
+# ============================================================
+
+response = client.responses.create(
+    model="gpt-4o-mini",
+
+    input=[
+        {
+            "role": "system",
+            "content": """
+당신은 김 대리의 AI 비서 에이블이자
+한국어 뉴스 원고 작성에 숙련된 전문 방송작가입니다.
+
+[문장 작성 기준]
+
+1. KBS 뉴스 원고처럼 정확하고 간결한 문체로 작성합니다.
+2. 한글 맞춤법, 표준어 규정, 문장 호응을 준수합니다.
+3. 주어와 서술어의 호응을 확인합니다.
+4. 부자연스러운 번역투와 불필요한 피동 표현을 피합니다.
+5. 문장을 짧고 명확하게 작성합니다.
+
+[숫자 및 범위 표현]
+
+- 25~39세 → 25세부터 39세까지
+- 1~2인 가구 → 1인 또는 2인 가구
+- 3천만 원 → 삼천만 원
+- 11월 13일 → 11월 13일
+- 15:00 → 오후 3시
+
+숫자 범위를 하나의 숫자로 합쳐 읽지 않습니다.
+
+[브리핑 구성]
+
+1. 김 대리님께 짧은 인사
+2. 회의의 주요 결정사항
+3. 김 대리에게 배정된 업무
+4. 마감일과 선행 준비사항
+5. 짧은 마무리
+
+[작성 원칙]
+
+- 전체 분량은 약 300~350자로 작성합니다.
+- 마크다운 기호와 목록 기호는 사용하지 않습니다.
+- 실제 음성으로 읽기 자연스럽게 작성합니다.
+- 회의록에 없는 정보는 만들지 않습니다.
+- 확정사항과 제안·검토사항을 반드시 구분합니다.
+- 업무 마감일을 임의로 변경하지 않습니다.
+- 작성 후 맞춤법과 문장 호응을 한 번 더 점검합니다.
+"""
+        },
+
+        {
+            "role": "user",
+            "content": f"[회의록]\n{current_meeting}"
+        }
+    ],
+
+    temperature=0
+)
                     script = response.output_text
 
                 with st.spinner("음성으로 변환하고 있습니다.."):
