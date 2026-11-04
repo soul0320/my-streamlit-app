@@ -356,7 +356,7 @@ if page == PAGES[0]:
         st.subheader("🎙️ 음성으로 요청하기")
         audio_value = st.audio_input("무엇을 도와드릴까요?")
         voice_on = st.toggle("🔊 답변을 음성으로 듣기", value=True)
-        run_voice = st.button("실행", type="primary", use_container_width=True)"
+        run_voice = st.button("실행", type="primary", use_container_width=True)
 
         # 최근 처리 결과: 인식된 질문(STT 정확성 확인), 이메일 발송 결과
         notice = st.session_state.notice
@@ -393,7 +393,7 @@ if page == PAGES[0]:
             submitted = st.form_submit_button("💬 에이블에게 보내기",
                                               type="primary", use_container_width=True)
 
-        if st.button("🗑️ 대화 기록 지우기", use_container_width=True"):
+        if st.button("🗑️ 대화 기록 지우기", use_container_width=True):
             st.session_state.messages_dict[st.session_state.active_doc] = []
             st.session_state.notice = None
             st.session_state.last_audio = None
@@ -938,7 +938,7 @@ elif page == PAGES[2]:
                 with col.container(border=True):
                     label = f"{d}일 · 오늘" if day == today else f"{d}일"
                     selected = day == st.session_state.cal_selected
-                    if st.button(label, key=f"cal_{day}", , use_container_width=True, type="primary" if selected else "secondary"):
+                    if st.button(label, key=f"cal_{day}", use_container_width=True, type="primary" if selected else "secondary"):
                         st.session_state.cal_selected = day
                         st.rerun()
                     for it in due_map.get(day, [])[:2]:
@@ -992,7 +992,7 @@ elif page == PAGES[2]:
             rows.sort(key=lambda r: r["날짜"])
             st.download_button("📥 캘린더 파일(.ics) 다운로드", data=make_ics(rows),
                                file_name="able_schedule.ics", mime="text/calendar",
-                               type="primary", use_container_width="True")
+                               type="primary", use_container_width=True)
             st.caption(f"마일스톤 {len(rows)}개(D-14, D-7, D-1, D-day)가 담깁니다. "
                        "파일을 열면 Google·Outlook·휴대폰 캘린더에 바로 등록됩니다.")
         else:
@@ -1165,7 +1165,7 @@ elif page == PAGES[4]:
                 with st.spinner("브리핑 원고를 쓰고 있습니다.."):
                     response = client.responses.create(
                         model="gpt-4o-mini",
-                        input=[{"role": "system", "content": 김 대리의 비서 에이블로서 출근길 1분 라디오 뉴스 브리핑을 350자 내외로 정중하고 또렷하게 작성하세요."},
+                        input=[{"role": "system", "content": "김 대리의 비서 에이블로서 출근길 1분 라디오 뉴스 브리핑을 350자 내외로 정중하고 또렷하게 작성하세요."},
                                {"role": "user", "content": f"[회의록]\n{meeting_text}"}],
                         temperature=0
                     )
