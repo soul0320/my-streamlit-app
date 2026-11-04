@@ -299,6 +299,18 @@ if "delete_target" not in st.session_state:
 if "messages_dict" not in st.session_state:
     st.session_state.messages_dict = {}       # 문서별 대화 기록
 
+
+# 동일 문서 중복 저장 방지
+# 파일명만 비교하지 않고 실제 문서 내용을 기준으로 확인
+import hashlib
+
+def get_document_hash(content):
+    return hashlib.sha256(
+        content.encode("utf-8")
+    ).hexdigest()
+
+
+
 # 사이드바 메뉴: 누른 메뉴의 기능만 화면에 표시
 with st.sidebar:
     st.header("🤖 에이블 메뉴")
@@ -320,17 +332,8 @@ with st.sidebar:
                 content = uf.read().decode("utf-8", errors="ignore")
                 st.session_state.uploaded_docs[uf.name] = content
                 st.session_state.active_doc = uf.name
+                
                 # 아카이브에 날짜/시간별로 누적 저장 (삭제해도 아카이브에는 계속 남음!)
-                # 동일 문서 중복 저장 방지
-              # 파일명만 비교하지 않고 실제 문서 내용을 기준으로 확인
-# 수정 : 들여쓰기 괜찮?
-import hashlib
-
-def get_document_hash(content):
-
-    return hashlib.sha256(
-        content.encode("utf-8")
-    ).hexdigest()
 
         st.success(f"{len(uploaded_files)}개 파일 로드 완료!")
 
@@ -910,7 +913,7 @@ def create_schedule_task(name, kind, expr, due, source, meeting_date):
         "kind": kind,
         "expr": expr,
         "due": due,
-        "use": due is not None # 기한이 없는 업무는 임의 날짜로 달력에 표시하지 않음
+        "use": due is not None, # 기한이 없는 업무는 임의 날짜로 달력에 표시하지 않음
         "done": False,
         "source": source,
         "meeting_date": meeting_date,
@@ -945,7 +948,15 @@ def make_ics(rows):
 # ── ④ 업무 상태 · 남은 기간 표시 (달력 색상과 정렬용) # 동글뱅이 4~5번. 코드 수정 안해도되는지 검토ㄱ) ──
 def task_status(due, done, today):
     """(아이콘, 상태, 정렬 순서) 반환: 완료 → 기한 경과 → 마감 임박 → 예정"""
-    if done:# ============================================================
+    if done:
+        return "✅", "완료", 3
+    if due < today:
+        return "🔴", "기한 경과", 0
+    if (due - today).days <= 3:
+        return "🟠", "마감 임박", 1
+    return "🔵", "예정", 2
+
+# ============================================================
 # 회의록 날짜 자동 인식
 # ============================================================
 # 지원 형식:
@@ -989,12 +1000,6 @@ def extract_meeting_date(text):
 
     # 회의일을 확인하지 못했다면 임의로 지정하지 않음
     return None
-        return "✅", "완료", 3
-    if due < today:
-        return "🔴", "기한 경과", 0
-    if (due - today).days <= 3:
-        return "🟠", "마감 임박", 1
-    return "🔵", "예정", 2
 
 def deadline_label(due, today):
     """D-3, 오늘 마감, 2일 경과처럼 남은 기간을 글로 표시"""
@@ -1052,7 +1057,7 @@ if "briefing" not in st.session_state:
     st.session_state.briefing = None
 
 # ── ⑥ 화면 ───────────────────────────────────────
-elif page == PAGES[2]:
+if page == PAGES[2]:
     st.subheader("📅 마감 캘린더")
     st.caption("회의록을 바꿔가며 일정을 추출해도, 기존 일정을 날리지 않고 중복 없이 누적하여 캘린더에 병합합니다.")
 
@@ -1720,7 +1725,7 @@ briefing_role = """
 if "briefing" not in st.session_state:
     st.session_state.briefing = None      # {"script": 원고, "audio": 음성} 저장 (메뉴를 옮겨도 유지)
 
-elif page == PAGES[4]:
+if page == PAGES[4]:
     st.subheader(f"🎧 1분 출근길 브리핑 ({st.session_state.active_doc})")
     st.caption("회의 결론과 먼저 챙길 일만 1분 안팎의 음성으로 들려 드립니다.")
 
@@ -1732,7 +1737,6 @@ elif page == PAGES[4]:
         else:
             try:
                 with st.spinner("브리핑 원고를 쓰고 있습니다.."):
-                  # 수정 : 들여쓰기 검증해야함.
 # ============================================================
 # 출근길 브리핑 원고 생성
 # ============================================================
@@ -1744,9 +1748,9 @@ elif page == PAGES[4]:
 # 5. 회의록에 없는 정보 생성 금지
 # ============================================================
 
-response = client.responses.create(
-    model="gpt-4o-mini",
-
+                    response = client.responses.create(
+                        model="gpt-4o-mini",
+# 수정 : 아래 들여쓰기 검증해야 함.
     input=[
         {
             "role": "system",
