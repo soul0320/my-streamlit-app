@@ -1,5 +1,8 @@
 
 import os, json, smtplib, re
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+import calendar as pycal
 import pandas as pd
 import streamlit as st
 from openai import OpenAI
@@ -10,17 +13,25 @@ from email.mime.text import MIMEText
 client = OpenAI()
 
 # 이메일 요청 시 받을 주소 (음성 인식 오류를 피하려고 코드에 고정)
-MY_EMAIL = "soul0218@ngmail.com" #수정필요
+MY_EMAIL = "soulsky0218@gmail.com" #수정필요 (기본수신 이메일)
 
 # 에이블 대표 이미지 경로 (app.py와 같은 폴더에 둔 파일 이름)
 IMAGE_PATH = "able.png"
 
 # 사이드바 메뉴 (아래 셀들도 이 이름으로 화면을 나눔)
 PAGES = ["🎙️ AI 비서", "📊 업무 우선순위 분석", "📅 마감 캘린더", "📨 팔로업 메일", "🎧 출근길 브리핑",
-         "🍃 오늘의 할 일"]
+         "🍃 오늘의 할 일", 🗄️ 회의록 아카이브]
 
 # 대화 기록 최대 개수 (질문 1 + 답변 1 = 2개 → 10이면 최근 5번의 대화)
 MAX_HISTORY = 10
+
+# 주석 추가 ~~~
+def kst_today():
+    return datetime.now(ZoneInfo("Asia/Seoul")).date()
+
+def kst_now_str():
+    return datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+
 
 # 음성용 텍스트 정리: 마크다운 기호를 빼야 TTS가 매끄럽게 읽음
 def to_speech_text(text):
@@ -172,7 +183,9 @@ def wants_email(question):
     return has_mail and has_send
 
 # ── 에이블에게 질문하기 (음성·텍스트 대화 공통) ──
-def ask_able(question):
+def ask_able(question, current_meeting):
+    active_doc_name = st.session_state.active_doc
+    history = st.session_state.messages_dict.get(active_doc_name, [])
     """질문 → LLM 호출(이메일 도구 포함) → (답변, 이메일 발송 결과) 반환"""
     # 프롬프트: 질문 + 고정 이메일 주소 + 회의록
     prompt = f"""
@@ -181,15 +194,14 @@ def ask_able(question):
 [김 대리 이메일 주소]
 {MY_EMAIL}
 
-[미팅 내용]
-{st.session_state.meeting_text}
+[미팅 내용: {active_doc_name}]
+{current_meeting}
 """
-
     # 1단계: 역할 → 이전 대화(멀티턴) → 이번 질문
     request = {
         "model": "gpt-4o-mini",
         "input": [{"role": "system", "content": sys_role}]
-                 + st.session_state.messages
+                 + history
                  + [{"role": "user", "content": prompt}],
         "temperature": 0
     }
@@ -233,7 +245,7 @@ def ask_able(question):
 # ══════════════════════════════════════════════════
 st.set_page_config(page_title="AI 개인비서 에이블", page_icon="🤖", layout="wide")
 st.title("🤖 AI 개인비서 에이블")
-st.caption("음성이나 대화로 질문하시면 답변해 드립니다.")
+st.caption("다중 회의록/업무자료 분석, 스마트 캘린더, 실시간 대화 및 지출/목표 대시보드를 제공합니다.")
 
 # 소개 영역: 왼쪽 이미지 / 오른쪽 역할·핵심 기능
 left, right = st.columns([1, 5])
@@ -269,17 +281,60 @@ with st.sidebar:
     st.divider()
 
     # 회의록 업로드 (사이드바에 있어서 어느 메뉴에서든 올리고 바꿀 수 있음)
-    st.subheader("📄 회의록 업로드")
-    uploaded_file = st.file_uploader("회의록 파일 (txt)", type=["txt"], label_visibility="collapsed")
-    if uploaded_file is not None:
-        st.session_state.meeting_text = uploaded_file.read().decode("utf-8")
-    if st.session_state.meeting_text:
-        st.success("회의록이 준비되었습니다.")
-    else:
-        st.info("회의록 파일을 업로드하면 회의 내용을 바탕으로 답변합니다.")
-    st.divider()
+    st.subheader("📄 문서 업로드")
+    uploaded_files = st.file_uploader(
+        "파일 업로드 (여러 개 가능: txt)", 
+        type=["txt"], 
+        accept_multiple_files=True,
+        label_visibility="collapsed"
+    )
 
-meeting_text = st.session_state.meeting_text   # 모든 메뉴에서 같은 회의록 사용
+    if uploaded_files:
+        for uf in uploaded_files:
+            if uf.name not in st.session_state.uploaded_docs:
+                content = uf.read().decode("utf-8", errors="ignore")
+                st.session_state.uploaded_docs[uf.name] = content
+                st.session_state.active_doc = uf.name
+                # 아카이브에 날짜/시간별로 누적 저장 (삭제해도 아카이브에는 계속 남음!)
+                st.session_state.archived_meetings.append({
+                    "time": kst_now_str(),
+                    "title": uf.name,
+                    "content": content
+                })
+        st.success(f"{len(uploaded_files)}개 파일 로드 완료!")
+
+    st.markdown("#### 📑 등록된 문서 목록")
+    doc_keys = list(st.session_state.uploaded_docs.keys())
+    if not doc_keys:
+        st.caption("등록된 문서가 없습니다.")
+    else:
+        for dname in doc_keys:
+            c_doc, c_del = st.columns([4, 1])
+            is_active = (dname == st.session_state.active_doc)
+            prefix = "👉 " if is_active else "📄 "
+            c_doc.write(f"{prefix}**{dname}**")
+            # 개별 파일 취소/삭제 기능
+            if c_del.button("❌", key=f"del_{dname}", help="이 문서를 작업 목록에서 제거합니다 (아카이브에는 보존됨)"):
+                del st.session_state.uploaded_docs[dname]
+                if st.session_state.active_doc == dname:
+                    st.session_state.active_doc = list(st.session_state.uploaded_docs.keys())[0] if st.session_state.uploaded_docs else ""
+                st.rerun()
+
+    if st.session_state.uploaded_docs:
+        st.divider()
+        st.session_state.active_doc = st.selectbox(
+            "🎯 현재 작업 대상 문서 선택", 
+            list(st.session_state.uploaded_docs.keys()),
+            index=list(st.session_state.uploaded_docs.keys()).index(st.session_state.active_doc) if st.session_state.active_doc in st.session_state.uploaded_docs else 0
+        )
+
+    st.divider()
+    active_history = st.session_state.messages_dict.get(st.session_state.active_doc, [])
+    st.subheader("📋 히스토리 요약")
+    st.markdown(f"**현재 문서:** `{st.session_state.active_doc or '선택 없음'}`")
+    st.markdown(f"**대화 기록:** {len(active_history) // 2}건 (최대 {MAX_HISTORY//2}회)")
+
+current_meeting = st.session_state.uploaded_docs.get(st.session_state.active_doc, "")
 
 
 # ══════════════════════════════════════════════════
@@ -290,18 +345,18 @@ if page == PAGES[0]:
 
     # ── 왼쪽: 회의록 업로드 + 음성 요청 ──
     with col_left:
-        st.subheader("📄 회의록")
-        if meeting_text == "":
-            st.caption("사이드바에서 회의록 파일을 업로드하면 여기서 내용을 볼 수 있습니다.")
+        st.subheader("📄 문서 업로드")
+        if not current_meeting:
+            st.info("사이드바에서 문서 파일을 업로드하면 여기서 내용을 볼 수 있습니다.")
         else:
-            with st.expander("회의록 미리보기"):     # 눌러야 내용이 펼쳐짐
-                st.text_area("회의록 내용", meeting_text, height=250, label_visibility="collapsed")
+            with st.expander("문서 원문 미리보기", expanded=True):     # 눌러야 내용이 펼쳐짐
+                st.text_area("문서 내용", current_meeting, height=230, label_visibility="collapsed")
 
         st.divider()
         st.subheader("🎙️ 음성으로 요청하기")
         audio_value = st.audio_input("무엇을 도와드릴까요?")
         voice_on = st.toggle("🔊 답변을 음성으로 듣기", value=True)
-        run_voice = st.button("실행", type="primary", width="stretch")
+        run_voice = st.button("실행", type="primary", use_container_width=True)"
 
         # 최근 처리 결과: 인식된 질문(STT 정확성 확인), 이메일 발송 결과
         notice = st.session_state.notice
@@ -317,11 +372,12 @@ if page == PAGES[0]:
 
     # ── 오른쪽: 에이블과 실시간 대화 (음성 질문도 함께 표시) ──
     with col_right:
-        st.subheader("💬 에이블과 실시간 대화")
-        with st.container(height=500, border=True):
-            if not st.session_state.messages:
-                st.caption("아직 대화가 없습니다. 아래에 메시지를 입력하거나 음성으로 요청해 보세요.")
-            for message in st.session_state.messages:
+        st.subheader(f"💬 '{st.session_state.active_doc}'전 실시간 대화")
+        current_history = st.session_state.messages_dict.setdefault(st.session_state.active_doc, [])
+        with st.container(height=480, border=True):
+            if not current_history:
+                st.caption("(f"'{st.session_state.active_doc}'에 대한 첫 대화를 시작해 보세요.")
+            for message in current_history:
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
 
@@ -335,10 +391,10 @@ if page == PAGES[0]:
             user_input = st.text_area("에이블에게 메시지 보내기",
                                       placeholder="어떤 업무를 도와드릴까요?")
             submitted = st.form_submit_button("💬 에이블에게 보내기",
-                                              type="primary", width="stretch")
+                                              type="primary", use_container_width=True)
 
-        if st.button("🗑️ 대화 기록 지우기", width="stretch"):
-            st.session_state.messages = []
+        if st.button("🗑️ 대화 기록 지우기", use_container_width=True"):
+            st.session_state.messages_dict[st.session_state.active_doc] = []
             st.session_state.notice = None
             st.session_state.last_audio = None
             st.rerun()
@@ -363,43 +419,92 @@ if page == PAGES[0]:
         question, source = user_input.strip(), "text"
 
     if question:
-        done = False
         try:
             with col_right, st.spinner("답변을 준비하고 있습니다.."):
-                answer, email = ask_able(question)
+                answer, email = ask_able(question, current_meeting)
 
                 # 대화 히스토리 저장 (질문·답변 한 쌍씩, 최근 MAX_HISTORY개만 유지)
-                st.session_state.messages.append({"role": "user", "content": question})
-                st.session_state.messages.append({"role": "assistant", "content": answer})
-                st.session_state.messages = st.session_state.messages[-MAX_HISTORY:]
+                current_history.append({"role": "user", "content": question})
+                current_history.append({"role": "assistant", "content": answer})
+                st.session_state.messages_dict[st.session_state.active_doc] = current_history[-MAX_HISTORY:]
                 st.session_state.notice = {"source": source, "question": question, "email": email}
 
                 # LLM 최종 응답을 음성으로 즉시 재생 (미션 5·6 TTS)
                 if voice_on:
                     speech = client.audio.speech.create(
-                        model="gpt-4o-mini-tts",
+                        model="tts-1",
                         voice="nova",
                         input=to_speech_text(answer),
                         instructions="비서가 담당자에게 얘기하는 정중한 말투로 빠뜨리지 말고 또박또박 읽어주세요."
                     )
                     st.session_state.last_audio = speech.content
                     st.session_state.play_audio = True
-            done = True
+            st.rerun()
         except Exception as e:
-            col_right.error(f"오류가 발생했습니다: {e}")
-        if done:
-            st.rerun()   # 대화창을 새 답변까지 다시 그림
+            col_right.error(f"오류: {e}")
 
 
 # ══════════════════════════════════════════════════
-# 메뉴 2: 업무 우선순위 분석 (아이젠하워 매트릭스)
+# 메뉴 2: 업무 우선순위 & 목 분석 (아이젠하워 매트릭스)
 # ══════════════════════════════════════════════════
-if page == PAGES[1]:
-    st.subheader("📊 업무 우선순위 분석")
-    st.caption("업로드한 회의록에서 김 대리 업무를 긴급도 × 중요도로 분류합니다.")
+elif page == PAGES[1]:
+    st.subheader("📊 업무 우선순위 & 목표 분석")
+    st.caption("선택된 회의록에서 김 대리 업무를 긴급도 × 중요도로 분류하고, 신제품 마케팅 지출 내역 및 주요 목표 진행 상황 대시보드를 시각화합니다.")
 
-    if st.button("우선순위 분석"):
-        if meeting_text == "":
+    priority_schema = {
+        "type": "json_schema",
+        "name": "priority",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "업무목록": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "업무명": {"type": "string"},
+                            "기한": {"type": ["string", "null"]},
+                            "긴급도": {"type": "string", "enum": ["높음", "낮음"]},
+                            "중요도": {"type": "string", "enum": ["높음", "낮음"]},
+                            "근거": {"type": "string"}
+                        },
+                        "required": ["업무명", "기한", "긴급도", "중요도", "근거"],
+                        "additionalProperties": False
+                    }
+                },
+                "참석자별업무": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "이름": {"type": "string"},
+                            "업무수": {"type": "integer"}
+                        },
+                        "required": ["이름", "업무수"],
+                        "additionalProperties": False
+                    }
+                }
+            },
+            "required": ["업무목록", "참석자별업무"],
+            "additionalProperties": False
+        }
+    }
+
+    priority_template = """
+다음 회의록을 분석하세요.
+1. 김 대리에게 배정된 업무를 모두 추출하세요 (기한, 긴급도, 중요도, 상세 근거).
+2. 참석자별 배정 업무 수를 세세요.
+
+[회의록]
+{meeting}
+"""
+    def classify(urgent, important):
+        if urgent == "높음" and important == "높음": return "즉시 착수"
+        elif important == "높음": return "순차 진행"
+        else: return "위임 검토"
+
+    if st.button("우선순위 분석", type="primary"):
+        if not current_meeting:
             st.warning("먼저 회의록 파일을 업로드해 주세요.")
         else:
             try:
@@ -407,22 +512,27 @@ if page == PAGES[1]:
                     response = client.responses.create(
                         model="gpt-4o-mini",
                         input=[{"role": "user",
-                                "content": priority_template.format(meeting=meeting_text)}],
+                                "content": priority_template.format(meeting=current_meeting)}],
                         text={"format": priority_schema},   # 정해진 JSON 형식으로만 답변
                         temperature=0
                     )
-                    data = json.loads(response.output_text)   # JSON 문자열 → 딕셔너리
+                    data = json.loads(res.output_text)   # JSON 문자열 → 딕셔너리
+                    st.session_state[f"priority_data_{st.session_state.active_doc}"] = data # 주석 추가가ㅏㅏ
+            except Exception as e:
+                st.error(f"분석 오류: {e}")
 
                 # ── ① 업무 집중도 (R&R 밸런스) ──────────
+            pdata = st.session_state.get(f"priority_data_{st.session_state.active_doc}")
+            if pdata:
                 df_people = pd.DataFrame(data["참석자별업무"])
-                kim = df_people[df_people["이름"].str.contains("김")]["업무수"].sum()
-                total = df_people["업무수"].sum()
+                kim = df_people[df_people["이름"].str.contains("김")]["업무수"].sum() if not df_people.empty else 0
+                total = df_people["업무수"].sum() if not df_people.empty else 1
 
                 st.markdown("#### ⚖️ 업무 집중도")
                 col1, col2 = st.columns(2)
                 col1.metric("김 대리 배정 업무", f"{kim}건")
                 col2.metric("전체 배정 업무 중 비중",
-                            f"{kim / total * 100:.0f}%" if total else "-")
+                            f"{kim / total * 100:.0f}%" if total else "-"# if total else 삭제할까 말까...?)
 
                 # 김 대리 업무가 3건 이상이거나 절반 이상이면 경보
                 if kim >= 3 or (total and kim / total >= 0.5):
@@ -450,15 +560,74 @@ if page == PAGES[1]:
                     for _, t in tasks.iterrows():
                         col.info(f"**{t['업무명']}**\n\n⏰ {t['기한']}")
 
-                # ── ③ 판단 근거 표 ───────────────────────
-                st.markdown("#### 📋 판단 근거")
+                # ── ③ 상세 분석 표 ───────────────────────
+                st.markdown("#### 📋 상세 분석 표")
                 st.dataframe(df_task[["분류", "업무명", "기한", "긴급도", "중요도", "근거"]],
-                             hide_index=True)
+                             column_config={
+                                 "근거": st.column_config.TextColumn("분석 근거 및 배경", width="large"),
+                                 "업무명": st.column_config.TextColumn("배정 업무명", width="medium")
+                             },
+                            use_container_width=True,
+                            hide_index=True
+                )
                 st.caption("※ 중요도는 회의 내용을 바탕으로 한 에이블의 판단입니다.")
 
             except Exception as e:
                 st.error(f"오류가 발생했습니다: {e}")
 
+                            
+    # ── ④ 시각화 대시보드: 지출 내역 & 목표 진행 상황] ──
+    st.divider()
+    st.markdown("### 📈 마케팅 지출 내역 및 목표 진행 상황 대시보드")
+    
+    col_dash1, col_dash2 = st.columns([1, 1], gap="large")
+
+    with col_dash1:
+        st.markdown("#### 💰 마케팅 예산 지출 내역 (총 5,000만 원)")
+        st.caption("회의록에 명시된 5천만 원 예산 배분 구성")
+        
+        # 지출 데이터프레임
+        df_expense = pd.DataFrame({
+            "항목": ["SNS 광고 (인스타/유튜브)", "인플루언서 협업", "숏폼/카드뉴스 제작", "출시 프로모션 이벤트", "예비비"],
+            "금액(백만원)": [25.0, 10.0, 8.0, 5.0, 2.0]
+        })
+        
+        # Streamlit 내장 도넛/파이 대용 시각화 및 지표
+        c_tot1, c_tot2 = st.columns([1, 2])
+        c_tot1.metric("총 집행 예산", "₩50M", delta="전체 100%")
+        c_tot2.dataframe(df_expense, hide_index=True, use_container_width=True)
+        st.bar_chart(df_expense.set_index("항목")["금액(백만원)"])
+
+    with col_dash2:
+        st.markdown("#### 🎯 김 대리 목표 진행 상황 (목표 달성률 %)")
+        st.caption("배정된 3대 핵심 과업 및 출시 일정 기준 진행 현황")
+        
+        df_goals = pd.DataFrame({
+            "핵심 목표 및 마일스톤": [
+                "경쟁사 A사 온라인 마케팅 사례 분석",
+                "신제품 기능 강조 숏폼/후기 초안 작성",
+                "중급 인플루언서 3인 후보군 섭외 조사",
+                "출시 2주 전 티저 광고 개시 준비",
+                "출시 기념 할인 & SNS 공유 프로모션"
+            ],
+            "진행률(%)": [85, 60, 45, 30, 20]
+        })
+        
+        # 수평형 바 차트 형태로 진행률 시각화
+        st.dataframe(
+            df_goals,
+            column_config={
+                "진행률(%)": st.column_config.ProgressColumn(
+                    "진행 상황 (%)",
+                    format="%d%%",
+                    min_value=0,
+                    max_value=100
+                ),
+                "핵심 목표 및 마일스톤": st.column_config.TextColumn("추진 과제", width="large")
+            },
+            hide_index=True,
+            use_container_width=True
+        )
 
 # ── 사이드바 아래쪽: 회의록 상태 · 저장된 대화 ──
 with st.sidebar:
@@ -473,6 +642,7 @@ with st.sidebar:
 
 # ══════════════════════════════════════════════════════════════
 # 메뉴 3: 마감 캘린더 (앱 안 달력 + .ics 다운로드)
+# 회의록 / 문서별 일정이 누적 병합되고, 다른 회의록을 추가해도 일정 중복을 방지합니다.
 #  - 이 셀은 app.py 끝에 "이어 붙이기"(-a) 합니다.
 #  - ⚠️ app.py 셀(%%writefile app.py)을 실행한 직후, 이 셀을 한 번만 실행하세요.
 # ══════════════════════════════════════════════════════════════
@@ -485,46 +655,46 @@ def kst_today():
     return datetime.now(ZoneInfo("Asia/Seoul")).date()
 
 # ── ① 일정 추출용 출력 스키마 (05 실습 JSON 구조화) ──
-schedule_schema = {
-    "type": "json_schema",
-    "name": "schedule",
-    "schema": {
-        "type": "object",
-        "properties": {
-            "김대리업무": {                      # 김 대리 업무 목록 (기한 없어도 포함)
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "일정명": {"type": "string"},
-                        "기한표현": {"type": ["string", "null"]},
-                        "기한일수": {"type": ["integer", "null"]}
-                    },
-                    "required": ["일정명", "기한표현", "기한일수"],
-                    "additionalProperties": False
+    schedule_schema = {
+        "type": "json_schema",
+        "name": "schedule",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "김대리업무": {                      # 김 대리 업무 목록 (기한 없어도 포함)
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "일정명": {"type": "string"},
+                            "기한표현": {"type": ["string", "null"]},
+                            "기한일수": {"type": ["integer", "null"]}
+                        },
+                        "required": ["일정명", "기한표현", "기한일수"],
+                        "additionalProperties": False
+                    }
+                },
+                "주요일정": {                        # 출시일 같은 전체 일정
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "일정명": {"type": "string"},
+                            "기한표현": {"type": ["string", "null"]},
+                            "기한일수": {"type": ["integer", "null"]}
+                        },
+                        "required": ["일정명", "기한표현", "기한일수"],
+                        "additionalProperties": False
+                    }
                 }
             },
-            "주요일정": {                        # 출시일 같은 전체 일정
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "일정명": {"type": "string"},
-                        "기한표현": {"type": ["string", "null"]},
-                        "기한일수": {"type": ["integer", "null"]}
-                    },
-                    "required": ["일정명", "기한표현", "기한일수"],
-                    "additionalProperties": False
-                }
-            }
-        },
-        "required": ["김대리업무", "주요일정"],
-        "additionalProperties": False
+            "required": ["김대리업무", "주요일정"],
+            "additionalProperties": False
+        }
     }
-}
 
-schedule_template = """
-다음 회의록에서 일정을 추출하세요.
+    schedule_template = """
+회의록에서 김대리업무와 주요일정을 추출하세요.
 
 [김대리업무]
 - 김 대리에게 배정된 업무를 업무 하나당 한 항목씩 빠짐없이 모두 적으세요.
@@ -583,7 +753,7 @@ def make_ics(rows):
     lines.append("END:VCALENDAR")
     return "\r\n".join(lines)
 
-# ── ④ 업무 상태 · 남은 기간 표시 (달력 색상과 정렬용) ──
+# ── ④ 업무 상태 · 남은 기간 표시 (달력 색상과 정렬용) # 동글뱅이 4~5번. 코드 수정 안해도되는지 검토ㄱ) ──
 def task_status(due, done, today):
     """(아이콘, 상태, 정렬 순서) 반환: 완료 → 기한 경과 → 마감 임박 → 예정"""
     if done:
@@ -618,18 +788,41 @@ def go_today():
 def select_day(day):
     st.session_state.cal_selected = day
 
-# ── ⑤ 세션 상태 초기화 (메뉴를 옮겨도 일정·달력 위치 유지) ──
+# ── ⑤ 세션 상태 초기화 (메뉴를 옮겨도 일정·달력 위치 유지) ── (각각 주석 달기?!!!!)
+if "messages_dict" not in st.session_state:
+    st.session_state.messages_dict = {}       # {문서명: [메시지들]} 형태로 문서별 대화 분리
+if "uploaded_docs" not in st.session_state:
+    st.session_state.uploaded_docs = {}       # {문서명: 본문내용}
+if "archived_meetings" not in st.session_state:
+    st.session_state.archived_meetings = []   # [{"시간": ..., "제목": ..., "내용": ...}] 삭제되어도 계속 유지
+if "active_doc" not in st.session_state:
+    st.session_state.active_doc = ""
+if "notice" not in st.session_state:
+    st.session_state.notice = None
+if "last_audio" not in st.session_state:
+    st.session_state.last_audio = None
+    st.session_state.play_audio = False
 if "schedule" not in st.session_state:
-    st.session_state.schedule = []                          # 추출한 일정
-    st.session_state.sched_ver = 0                          # 새로 추출할 때마다 +1 (입력칸 초기화용)
-    st.session_state.cal_base = kst_today()                 # 기한 계산 기준일
-    st.session_state.cal_view = kst_today().replace(day=1)  # 보고 있는 달
-    st.session_state.cal_selected = kst_today()             # 선택한 날짜
+    st.session_state.schedule = []
+if "sched_ver" not in st.session_state:
+    st.session_state.sched_ver = 0
+if "cal_base" not in st.session_state:
+    st.session_state.cal_base = kst_today()
+if "cal_view" not in st.session_state:
+    st.session_state.cal_view = kst_today().replace(day=1)
+if "cal_selected" not in st.session_state:
+    st.session_state.cal_selected = kst_today()
+if "followups" not in st.session_state:
+    st.session_state.followups = []
+if "fu_ver" not in st.session_state:
+    st.session_state.fu_ver = 0
+if "briefing" not in st.session_state:
+    st.session_state.briefing = None
 
 # ── ⑥ 화면 ───────────────────────────────────────
-if page == PAGES[2]:
+elif page == PAGES[2]:
     st.subheader("📅 업무 캘린더")
-    st.caption("회의록의 시한을 날짜로 계산해 달력에 표시합니다. 날짜를 누르면 그날 마감하는 업무를 볼 수 있습니다.")
+    st.caption("회의록을 바꿔가며 일정을 추출해도, 기존 일정을 날리지 않고 중복 없이 누적하여 캘린더에 병합합니다.")
 
     # ① 일정 추출
     c1, c2 = st.columns([1, 1], vertical_alignment="bottom")
@@ -637,22 +830,24 @@ if page == PAGES[2]:
                                               value=st.session_state.cal_base)
     base_day = st.session_state.cal_base
 
-    if c2.button("🔍 회의록에서 일정 추출", type="primary", width="stretch"):
-        if meeting_text == "":
+    if c2.button("f"🔍 '{st.session_state.active_doc}'에서 일정 추출", type="primary", width="stretch"):
+        if not current_meeting:
             st.warning("먼저 사이드바에서 회의록 파일을 업로드해 주세요.")
         else:
             try:
-                with st.spinner("회의록에서 일정을 찾고 있습니다.."):
+                with st.spinner("신규 일정 추출 및 기존 캘린더와 병합 중.."):
                     response = client.responses.create(
                         model="gpt-4o-mini",
                         input=[{"role": "user",
-                                "content": schedule_template.format(meeting=meeting_text)}],
+                                "content": schedule_template.format(meeting=current_meeting)}],
                         text={"format": schedule_schema},
                         temperature=0
                     )
                     data = json.loads(response.output_text)
 
-                schedule = []
+                existing_keys = {(it["name"], it["due"]) for it in st.session_state.schedule}
+                added_count = 0
+
                 for kind, items in [("김 대리 업무", data["김대리업무"]), ("주요 일정", data["주요일정"])]:
                     for item in items:
                         # 구분 이름만 있는 빈 항목은 건너뛰기 (AI 출력 검증)
@@ -664,23 +859,26 @@ if page == PAGES[2]:
                         # '출시 2주 전'처럼 다른 일정 기준 시점은 AI가 계산한 일수를 쓰지 않음
                         if expr and re.search(r"\d+\s*(주|일)\s*전", expr):
                             days = None
-                        due = calc_due(base_day, expr, days)
+                        due = calc_due(base_day, expr, days) or (base_day + timedelta(days=7))
                         schedule.append({"name": item["일정명"], "kind": kind, "expr": expr,
                                          "due": due or base_day + timedelta(days=7),
-                                         "use": due is not None, "done": False})
+                        
+                        if (name, due) not in existing_keys:
+                            st.session_state.schedule.append({
+                                "name": name, "kind": kind, "expr": expr, "due": due,
+                                "use": True, "done": False, "source": st.session_state.active_doc
+                            })
+                            existing_keys.add((name, due))
+                            added_count += 1
 
-                st.session_state.schedule = schedule
                 st.session_state.sched_ver += 1
-                # 가장 빠른 마감일이 있는 달로 이동
-                dated = [it["due"] for it in schedule if it["use"]]
-                first = min(dated) if dated else base_day
-                st.session_state.cal_view = first.replace(day=1)
-                st.session_state.cal_selected = first
+                st.success(f"새로운 일정 {added_count}건이 중복 없이 캘린더에 누적 추가되었습니다!")
             except Exception as e:
-                st.error(f"오류가 발생했습니다: {e}")
+                st.error(f"오류: {e}")
 
     schedule = st.session_state.schedule
     ver = st.session_state.sched_ver
+
 
     if not schedule:
         st.info("회의록을 업로드한 뒤 '회의록에서 일정 추출'을 눌러 주세요.")
@@ -691,7 +889,7 @@ if page == PAGES[2]:
             for i, it in enumerate(schedule):
                 a, b, c, d = st.columns([1, 3, 2, 1], vertical_alignment="center")
                 it["use"] = a.checkbox("달력 표시", value=it["use"], key=f"use_{ver}_{i}")
-                b.markdown(f"**{it['name']}**  \n{it['kind']} · 회의 표현: {it['expr'] or '기한 미정'}")
+                b.markdown(f"**{it['name']}** ({it['kind']})  \n<small>출처: {it.get('source', '알 수 없음')}</small>", unsafe_allow_html=True)
                 it["due"] = c.date_input("마감일", value=it["due"], key=f"due_{ver}_{i}")
                 it["done"] = d.checkbox("완료", value=it["done"], key=f"done_{ver}_{i}")
 
@@ -711,10 +909,19 @@ if page == PAGES[2]:
         st.divider()
         view = st.session_state.cal_view
         n1, n2, n3, n4 = st.columns([1, 3, 1, 1], vertical_alignment="center")
-        n1.button("◀ 이전 달", key="cal_prev", on_click=move_month, args=(-1,), width="stretch")
+        if n1.button("◀ 이전 달", use_container_width=True):
+            y, m = (view.year, view.month - 1) if view.month > 1 else (view.year - 1, 12)
+            st.session_state.cal_view = date(y, m, 1)
+            st.rerun()
         n2.markdown(f"### {view.year}년 {view.month}월")
-        n3.button("다음 달 ▶", key="cal_next", on_click=move_month, args=(1,), width="stretch")
-        n4.button("오늘", key="cal_today", on_click=go_today, width="stretch")
+        if n3.button("다음 달 ▶", use_container_width=True):
+            y, m = (view.year, view.month + 1) if view.month < 12 else (view.year + 1, 1)
+            st.session_state.cal_view = date(y, m, 1)
+            st.rerun()
+        if n4.button("오늘", use_container_width=True):
+            st.session_state.cal_view = today.replace(day=1)
+            st.session_state.cal_selected = today
+            st.rerun()
         st.caption("🔴 기한 경과 · 🟠 마감 임박(3일 이내) · 🔵 예정 · ✅ 완료 · ⚪ 기한 미정 · ⏰ 마일스톤(D-14, D-7, D-1)")
 
         # ④ 달력: 요일 머리글 + 날짜 칸 (월요일 시작)
@@ -731,11 +938,14 @@ if page == PAGES[2]:
                 with col.container(border=True):
                     label = f"{d}일 · 오늘" if day == today else f"{d}일"
                     selected = day == st.session_state.cal_selected
-                    st.button(label, key=f"cal_{day}", width="stretch",
-                              type="primary" if selected else "secondary",
-                              on_click=select_day, args=(day,))
+                    if st.button(label, key=f"cal_{day}", , use_container_width=True, type="primary" if selected else "secondary"):
+                        st.session_state.cal_selected = day
+                        st.rerun()
+                    for it in due_map.get(day, [])[:2]:
+                        s_icon = "✅" if it["done"] else "🔴"
+                        st.caption(f"{s_icon} {it['name'][:9]}")
 
-                    # 칸이 너무 길어지지 않게 마감 업무는 2건까지, 제목은 14자까지만
+                    # 칸이 너무 길어지지 않게 마감 업무는 2건까지, 제목은 14자까지만 #(수정 : 삭제할지 말지ㅠ)
                     items = sort_tasks(due_map.get(day, []), today)
                     if items:
                         st.caption(f"마감 업무 {len(items)}건")
@@ -752,7 +962,7 @@ if page == PAGES[2]:
         # ⑤ 선택한 날짜의 마감 업무
         sel = st.session_state.cal_selected
         st.markdown(f"#### 📌 {sel.month}월 {sel.day}일 마감 업무")
-        items = sort_tasks(due_map.get(sel, []), today)
+        items = sort_tasks(due_map.get(sel, []), today) ### items = due_map.get(sel, []) (이걸로 수정 안해도 될지)
         if not items:
             st.info("선택한 날짜에 마감하는 업무가 없습니다.")
         for it in items:
@@ -782,7 +992,7 @@ if page == PAGES[2]:
             rows.sort(key=lambda r: r["날짜"])
             st.download_button("📥 캘린더 파일(.ics) 다운로드", data=make_ics(rows),
                                file_name="able_schedule.ics", mime="text/calendar",
-                               type="primary", width="stretch")
+                               type="primary", use_container_width="True")
             st.caption(f"마일스톤 {len(rows)}개(D-14, D-7, D-1, D-day)가 담깁니다. "
                        "파일을 열면 Google·Outlook·휴대폰 캘린더에 바로 등록됩니다.")
         else:
@@ -849,10 +1059,10 @@ if "followups" not in st.session_state:
 
 if page == PAGES[3]:
     st.subheader("📨 팔로업 메일 초안")
-    st.caption("회의에서 동료에게 받아야 할 자료를 찾아 요청 메일 초안을 만들고, 승인하면 발송합니다.")
+    st.caption("회의에서 동료에게 받아야 할 자료를 찾아 요청 메일 초안을 만들고, 승인하면 발송합니다. 발송 완료 후에도 내용을 수정하여 같은 담당자나 다른 수신자에게 자유롭게 추가 발송할 수 있습니다.")
 
     if st.button("초안 만들기", key="fu_make", type="primary"):
-        if meeting_text == "":
+        if not current_meeting:
             st.warning("먼저 사이드바에서 회의록 파일을 업로드해 주세요.")
         else:
             try:
@@ -860,7 +1070,7 @@ if page == PAGES[3]:
                     response = client.responses.create(
                         model="gpt-4o-mini",
                         input=[{"role": "user",
-                                "content": followup_template.format(meeting=meeting_text)}],
+                                "content": followup_template.format(meeting=current_meeting)}],
                         text={"format": followup_schema},
                         temperature=0
                     )
@@ -888,8 +1098,12 @@ if page == PAGES[3]:
         d["메일제목"] = st.text_input("제목", value=d["메일제목"], key=f"fu_sub_{ver}_{i}")
         d["메일본문"] = st.text_area("본문 (수정 가능)", value=d["메일본문"], height=200,
                                   key=f"fu_body_{ver}_{i}")
+        
+        col_s1, col_s2 = st.columns([1, 4])
+        with col_s1:
+            send_now = st.button("🚀 이메일 전송", key=f"fu_send_{ver}_{i}", type="primary")
 
-        if d["sent"]:
+        if d["sent"]: #수정? : 이 바로 3줄 삭제하고, if send_now:를 넣을지 고민
             st.success(f"📧 {d['sent']}(으)로 발송했습니다.")
         elif st.button("✅ 승인하고 발송", key=f"fu_send_{ver}_{i}"):
             if "@" not in d["to"]:
@@ -898,10 +1112,16 @@ if page == PAGES[3]:
                 with st.spinner("메일을 보내고 있습니다.."):
                     result = send_email(d["to"], d["메일제목"], d["메일본문"])   # 미션 1 함수 재사용
                 if result["status"] == "success":
-                    d["sent"] = d["to"]      # 중복 발송 방지
-                    st.rerun()
+                    t_str = datetime.now().strftime("%H:%M:%S")
+                    d.setdefault("logs", []).append(f"[{t_str}] 수신처: {d['to']} (발송 성공)")
+                    st.success("✅ 메일이 성공적으로 발송되었습니다! (필요시 내용을 수정해 다시 전송할 수 있습니다)")
                 else:
-                    st.error(f"이메일 발송 실패: {result.get('error')}")
+                    st.error(f"발송 실패: {res.get('error')}")
+
+        if d.get("logs"):
+            with st.expander("이 메일의 발송 이력"):
+                for log in d["logs"]:
+                    st.caption(log)
 
 # ══════════════════════════════════════════════════════════════
 # 메뉴 5: 1분 출근길 오디오 브리핑
@@ -931,21 +1151,21 @@ briefing_role = """
 if "briefing" not in st.session_state:
     st.session_state.briefing = None      # {"script": 원고, "audio": 음성} 저장 (메뉴를 옮겨도 유지)
 
-if page == PAGES[4]:
-    st.subheader("🎧 1분 출근길 브리핑")
+elif page == PAGES[4]:
+    st.subheader(f"🎧 1분 출근길 브리핑 ({st.session_state.active_doc})")
     st.caption("회의 결론과 먼저 챙길 일만 1분 안팎의 음성으로 들려 드립니다.")
 
     voice = st.selectbox("목소리", ["nova", "alloy", "shimmer", "onyx"], key="br_voice")
 
-    if st.button("브리핑 만들기", key="br_make", type="primary"):
-        if meeting_text == "":
+    if st.button("브리핑 생성", type="primary"): # 수정 : key="br_make" 삭제해도 되겠지...?
+        if not current_meeting:
             st.warning("먼저 사이드바에서 회의록 파일을 업로드해 주세요.")
         else:
             try:
                 with st.spinner("브리핑 원고를 쓰고 있습니다.."):
                     response = client.responses.create(
                         model="gpt-4o-mini",
-                        input=[{"role": "system", "content": briefing_role},
+                        input=[{"role": "system", "content": 김 대리의 비서 에이블로서 출근길 1분 라디오 뉴스 브리핑을 350자 내외로 정중하고 또렷하게 작성하세요."},
                                {"role": "user", "content": f"[회의록]\n{meeting_text}"}],
                         temperature=0
                     )
@@ -953,7 +1173,7 @@ if page == PAGES[4]:
 
                 with st.spinner("음성으로 변환하고 있습니다.."):
                     speech = client.audio.speech.create(
-                        model="gpt-4o-mini-tts",
+                        model="tts-1",
                         voice=voice,
                         input=script,
                         instructions="라디오 뉴스 앵커처럼 또렷하고 경쾌하게, 조금 빠른 속도로 읽어 주세요."
@@ -997,7 +1217,7 @@ def save_today_done(index, key):
     st.session_state.schedule[index]["done"] = st.session_state[key]
     st.session_state.sched_ver += 1    # 캘린더의 완료 체크칸도 새 값으로 다시 그리기
 
-if page == PAGES[5]:
+elif page == PAGES[5]:
     st.subheader("🍃 오늘의 할 일")
     today = kst_today()                 # 캘린더 셀의 한국 시간 기준 오늘
     st.caption(f"{today:%Y.%m.%d} · 김 대리님의 업무")
@@ -1007,7 +1227,7 @@ if page == PAGES[5]:
              if it["kind"] == "김 대리 업무"]
 
     if not tasks:
-        st.info("'📅 마감 캘린더' 메뉴에서 '🔍 회의록에서 일정 추출'을 먼저 눌러 주세요.")
+        st.info("'📅 마감 캘린더' 메뉴에서 먼저 일정을 추출해 주세요.")
     else:
         pending = [(i, it) for i, it in tasks if not it["done"]]
         done = [(i, it) for i, it in tasks if it["done"]]
@@ -1049,3 +1269,25 @@ if page == PAGES[5]:
                 st.checkbox(it["name"], value=True, key=key,
                             on_change=save_today_done, args=(i, key))
             st.caption("체크를 해제하면 미완료 목록으로 돌아가요.")
+
+# ══════════════════════════════════════════════════
+# 메뉴 7: 🗄️ 회의록 아카이브 (날짜/시간별 보존 및 조회)
+# ══════════════════════════════════════════════════
+elif page == PAGES[6]:
+    st.subheader("🗄️ 회의록 영구 아카이브 (날짜/시간별 기록실)")
+    st.caption("사이드바 작업 목록에서 회의록을 삭제하거나 교체하더라도, 업로드되었던 모든 회의록 원본과 등록 일시가 이곳에 안전하게 영구 보존됩니다.")
+
+    archives = st.session_state.archived_meetings
+    if not archives:
+        st.info("아직 저장된 회의록 아카이브가 없습니다.")
+    else:
+        st.markdown(f"**총 보존 회의록:** `{len(archives)}건`")
+        for idx, item in enumerate(reversed(archives), 1):
+            with st.expander(f"🕒 [{item['time']}] {item['title']}", expanded=(idx == 1)):
+                st.caption(f"등록 시각: {item['time']}")
+                st.text_area("회의록 원문", item["content"], height=200, key=f"arc_view_{idx}")
+                if st.button("📥 이 문서를 현재 작업 문서로 다시 불러오기", key=f"restore_{idx}"):
+                    st.session_state.uploaded_docs[item["title"]] = item["content"]
+                    st.session_state.active_doc = item["title"]
+                    st.success(f"'{item['title']}' 문서가 활성 작업 목록으로 복원되었습니다!")
+                    st.rerun()
