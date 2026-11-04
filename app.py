@@ -274,6 +274,16 @@ if "last_audio" not in st.session_state:
     st.session_state.last_audio = None    # 최근 답변 음성
     st.session_state.play_audio = False   # 새 답변일 때만 자동 재생
 
+# 문서 업로드 및 문서별 대화 기록 초기화 (사이드바 실행 전에 필요)
+if "uploaded_docs" not in st.session_state:
+    st.session_state.uploaded_docs = {}       # {문서명: 본문내용}
+if "active_doc" not in st.session_state:
+    st.session_state.active_doc = ""          # 현재 선택한 문서
+if "archived_meetings" not in st.session_state:
+    st.session_state.archived_meetings = []   # 삭제한 문서도 보존하는 아카이브
+if "messages_dict" not in st.session_state:
+    st.session_state.messages_dict = {}       # 문서별 대화 기록
+
 # 사이드바 메뉴: 누른 메뉴의 기능만 화면에 표시
 with st.sidebar:
     st.header("🤖 에이블 메뉴")
