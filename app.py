@@ -498,7 +498,7 @@ elif page == PAGES[1]:
 [회의록]
 {meeting}
 """
-def classify(urgent, important):
+    def classify(urgent, important):
         if urgent == "높음" and important == "높음": return "즉시 착수"
         elif important == "높음": return "순차 진행"
         else: return "위임 검토"
@@ -694,7 +694,7 @@ schedule_schema = {
         }
     }
 
-    schedule_template = """
+schedule_template = """
 회의록에서 김대리업무와 주요일정을 추출하세요.
 
 [김대리업무]
@@ -1215,7 +1215,7 @@ def save_today_done(index, key):
     st.session_state.schedule[index]["done"] = st.session_state[key]
     st.session_state.sched_ver += 1    # 캘린더의 완료 체크칸도 새 값으로 다시 그리기
 
-elif page == PAGES[5]:
+if page == PAGES[5]:
     st.subheader("🍃 오늘의 할 일")
     today = kst_today()                 # 캘린더 셀의 한국 시간 기준 오늘
     st.caption(f"{today:%Y.%m.%d} · 김 대리님의 업무")
