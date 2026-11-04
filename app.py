@@ -1174,7 +1174,7 @@ if page == PAGES[3]:
             st.caption(f"📧 최근 발송 주소: {d['sent']}")
 
 #수정 : 이부분은 삭제할지 말지 &^^^^^
-                    if d.get("logs"):
+        if d.get("logs"):
             with st.expander("이 메일의 발송 이력"):
                 for log in d["logs"]:
                     st.caption(log)
