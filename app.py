@@ -503,7 +503,7 @@ elif page == PAGES[1]:
         elif important == "높음": return "순차 진행"
         else: return "위임 검토"
 
-    if st.button("우선순위 분석", type="primary"):
+    if st.button("우선순위 분석"): # 수정 : 12번 검증 셀 문자열과 일치하도록 type="primary"를 제거해도 되는지?
         if not current_meeting:
             st.warning("먼저 회의록 파일을 업로드해 주세요.")
         else:
@@ -532,7 +532,7 @@ elif page == PAGES[1]:
                 col1, col2 = st.columns(2)
                 col1.metric("김 대리 배정 업무", f"{kim}건")
                 col2.metric("전체 배정 업무 중 비중",
-                            f"{kim / total * 100:.0f}%" if total else "-"# if total else 삭제할까 말까...?)
+                            f"{kim / total * 100:.0f}%" if total else "-") # if total else 삭제할까 말까...?)
 
                 # 김 대리 업무가 3건 이상이거나 절반 이상이면 경보
                 if kim >= 3 or (total and kim / total >= 0.5):
