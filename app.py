@@ -3,6 +3,12 @@ import os, json, smtplib, re
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 import calendar as pycal
+
+# 업무 고유 ID 생성 및 유사 업무 비교
+import uuid
+import hashlib
+from difflib import SequenceMatcher
+
 import pandas as pd
 import streamlit as st
 from openai import OpenAI
@@ -20,7 +26,7 @@ IMAGE_PATH = "able.png"
 
 # 사이드바 메뉴 (아래 셀들도 이 이름으로 화면을 나눔)
 PAGES = ["🎙️ AI 비서", "📊 업무 우선순위 분석", "📅 마감 캘린더", "📨 팔로업 메일", "🎧 출근길 브리핑",
-         "🍃 오늘의 할 일", "🗄️ 회의록 아카이브"]
+         "🍃 오늘의 할 일", "🗂️ 회의 자료실"]
 
 # 대화 기록 최대 개수 (질문 1 + 답변 1 = 2개 → 10이면 최근 5번의 대화)
 MAX_HISTORY = 10
@@ -282,6 +288,14 @@ if "active_doc" not in st.session_state:
     st.session_state.active_doc = ""          # 현재 선택한 문서
 if "archived_meetings" not in st.session_state:
     st.session_state.archived_meetings = []   # 삭제한 문서도 보존하는 아카이브
+# ============================================================
+# 문서 삭제 2단계 확인 상태 관리
+# ============================================================
+# None : 삭제 요청 없음
+# 문서 ID : 해당 문서의 삭제 확인 대기
+# ============================================================
+if "delete_target" not in st.session_state:
+    st.session_state.delete_target = None
 if "messages_dict" not in st.session_state:
     st.session_state.messages_dict = {}       # 문서별 대화 기록
 
@@ -317,7 +331,7 @@ def get_document_hash(content):
     return hashlib.sha256(
         content.encode("utf-8")
     ).hexdigest()
-    
+
         st.success(f"{len(uploaded_files)}개 파일 로드 완료!")
 
     st.markdown("#### 📑 등록된 문서 목록")
@@ -668,6 +682,11 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 import calendar as pycal
 
+# 업무 고유 ID 생성 및 유사 업무 비교
+import uuid
+import hashlib
+from difflib import SequenceMatcher
+
 # 오늘 날짜는 한국 시간 기준 (Streamlit Cloud 서버는 UTC라 date.today()를 쓰면 오전 9시 전엔 하루 전 날짜가 됨)
 def kst_today():
     return datetime.now(ZoneInfo("Asia/Seoul")).date()
@@ -747,6 +766,158 @@ def calc_due(base, expr, days):
         return (base.replace(day=1) + timedelta(days=32)).replace(day=1)
     return None
 
+# ============================================================
+# 업무 고유 ID 및 변경 이력 관리
+# ============================================================
+# 기능:
+# 1. 업무마다 고유 ID 부여
+# 2. 기존 업무와 신규 업무의 유사도 비교
+# 3. 업무가 수정되면 기존 ID 유지
+# 4. 변경 전후 내용을 이력으로 보관
+#
+# 주의:
+# 유사도가 높다고 자동으로 같은 업무라고 확정하지 않음
+# 최종 판단은 사용자가 수행
+# ============================================================
+
+def create_task_id():
+    """업무별 고유 ID 생성"""
+    return str(uuid.uuid4())
+
+
+def compare_task_names(old_name, new_name):
+    """두 업무명의 문자열 유사도 계산"""
+
+    old_name = re.sub(r"\s+", "", old_name)
+    new_name = re.sub(r"\s+", "", new_name)
+
+    return SequenceMatcher(
+        None,
+        old_name,
+        new_name
+    ).ratio()
+
+
+def update_task_history(task, new_due, meeting_date, source):
+    """기존 업무의 마감일을 수정하고 변경 이력을 저장"""
+
+    # 기존 일정과 변경된 일정 비교
+    old_due = task["due"]
+
+    # 변경 이력 저장 공간이 없다면 생성
+    task.setdefault("history", [])
+
+    # 업무 변경 사항 기록
+    task["history"].append({
+        "meeting_date": meeting_date,
+        "old_due": old_due,
+        "new_due": new_due,
+        "source": source,
+        "updated_at": kst_now_str()
+    })
+
+    # 기존 업무의 마감일 변경
+    task["due"] = new_due
+
+
+def find_similar_tasks(new_name, schedule, threshold=0.65):
+    """기존 일정 중 유사한 업무 후보를 검색"""
+
+    candidates = []
+
+    for task in schedule:
+
+        similarity = compare_task_names(
+            task["name"],
+            new_name
+        )
+
+        if similarity >= threshold:
+
+            candidates.append({
+                "task": task,
+                "similarity": similarity
+            })
+
+    # 유사도가 높은 순서로 정렬
+    return sorted(
+        candidates,
+        key=lambda x: x["similarity"],
+        reverse=True
+    )
+
+
+def get_source_hash(content, meeting_date):
+    """동일 회의록을 반복 분석했는지 확인하는 식별값"""
+
+    raw = f"{meeting_date.isoformat()}\n{content}"
+
+    return hashlib.sha256(
+        raw.encode("utf-8")
+    ).hexdigest()
+
+# ============================================================
+# 회의록 날짜 자동 인식
+# ============================================================
+# 지원 형식:
+# 2026-11-04
+# 2026.11.04
+# 2026/11/04
+# 2026년 11월 4일
+#
+# 주의:
+# 회의 날짜 또는 회의 일시로 표시된 항목만 우선 탐색
+# 날짜를 확인하지 못하면 None 반환
+# ============================================================
+
+def extract_meeting_date(text):
+
+    # 회의 날짜가 표시된 행을 우선 검색
+    patterns = [
+        r"회의\s*일시\s*[:：]\s*(\d{4})[-./년]\s*(\d{1,2})[-./월]\s*(\d{1,2})",
+        r"회의\s*날짜\s*[:：]\s*(\d{4})[-./년]\s*(\d{1,2})[-./월]\s*(\d{1,2})",
+        r"회의일\s*[:：]\s*(\d{4})[-./년]\s*(\d{1,2})[-./월]\s*(\d{1,2})",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(pattern, text)
+
+        if match:
+
+            try:
+
+                year, month, day = map(
+                    int,
+                    match.groups()
+                )
+
+                return date(year, month, day)
+
+            except ValueError:
+
+                continue
+
+    # 회의일을 확인하지 못했다면 임의로 지정하지 않음
+    return None
+
+def create_schedule_task(name, kind, expr, due, source, meeting_date):
+    """기존 일정 데이터 구조를 유지하며 신규 업무 생성"""
+
+    return {
+        "task_id": create_task_id(),
+        "name": name,
+        "kind": kind,
+        "expr": expr,
+        "due": due,
+        "use": due is not None # 기한이 없는 업무는 임의 날짜로 달력에 표시하지 않음
+        "done": False,
+        "source": source,
+        "meeting_date": meeting_date,
+        "history": []
+    }
+
+
 def make_milestones(name, due, base):
     """마감일 기준 D-14, D-7, D-1, D-day 생성 (기준일보다 이전 날짜는 제외)"""
     rows = []
@@ -774,7 +945,50 @@ def make_ics(rows):
 # ── ④ 업무 상태 · 남은 기간 표시 (달력 색상과 정렬용) # 동글뱅이 4~5번. 코드 수정 안해도되는지 검토ㄱ) ──
 def task_status(due, done, today):
     """(아이콘, 상태, 정렬 순서) 반환: 완료 → 기한 경과 → 마감 임박 → 예정"""
-    if done:
+    if done:# ============================================================
+# 회의록 날짜 자동 인식
+# ============================================================
+# 지원 형식:
+# 2026-11-04
+# 2026.11.04
+# 2026/11/04
+# 2026년 11월 4일
+#
+# 주의:
+# 회의 날짜 또는 회의 일시로 표시된 항목만 우선 탐색
+# 날짜를 확인하지 못하면 None 반환
+# ============================================================
+
+def extract_meeting_date(text):
+
+    # 회의 날짜가 표시된 행을 우선 검색
+    patterns = [
+        r"회의\s*일시\s*[:：]\s*(\d{4})[-./년]\s*(\d{1,2})[-./월]\s*(\d{1,2})",
+        r"회의\s*날짜\s*[:：]\s*(\d{4})[-./년]\s*(\d{1,2})[-./월]\s*(\d{1,2})",
+        r"회의일\s*[:：]\s*(\d{4})[-./년]\s*(\d{1,2})[-./월]\s*(\d{1,2})",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(pattern, text)
+
+        if match:
+
+            try:
+
+                year, month, day = map(
+                    int,
+                    match.groups()
+                )
+
+                return date(year, month, day)
+
+            except ValueError:
+
+                continue
+
+    # 회의일을 확인하지 못했다면 임의로 지정하지 않음
+    return None
         return "✅", "완료", 3
     if due < today:
         return "🔴", "기한 경과", 0
@@ -843,10 +1057,52 @@ elif page == PAGES[2]:
     st.caption("회의록을 바꿔가며 일정을 추출해도, 기존 일정을 날리지 않고 중복 없이 누적하여 캘린더에 병합합니다.")
 
     # ① 일정 추출
-    c1, c2 = st.columns([1, 1], vertical_alignment="bottom")
-    st.session_state.cal_base = c1.date_input("회의 날짜 (기한 계산 기준일)",
-                                              value=st.session_state.cal_base)
-    base_day = st.session_state.cal_base
+    # 회의록 날짜 자동 인식 + 수동 수정 기능
+
+    detected_date = extract_meeting_date(current_meeting)
+
+    # 현재 문서별로 날짜 입력 상태를 구분
+    document_key = hashlib.sha256(
+        current_meeting.encode("utf-8")
+    ).hexdigest()[:12]
+
+    date_key = f"meeting_date_{document_key}"
+
+    # 새 문서를 처음 선택한 경우에만 날짜 초기화
+    if date_key not in st.session_state:
+
+        if detected_date:
+            st.session_state[date_key] = detected_date
+        else:
+            st.session_state[date_key] = kst_today()
+
+    # 회의 날짜 자동 인식 여부 표시
+    if detected_date:
+
+        st.success(
+            f"✅ 회의 날짜 자동 인식: {detected_date}"
+        )
+
+    else:
+
+        st.warning(
+            "⚠️ 회의록에서 회의 날짜를 확인하지 못했습니다. "
+            "아래에서 회의 날짜를 직접 선택해 주세요."
+        )
+
+    c1, c2 = st.columns(
+        [1, 1],
+        vertical_alignment="bottom"
+    )
+
+    # 자동 인식한 날짜도 사용자가 수정 가능
+    base_day = c1.date_input(
+        "회의 날짜 (기한 계산 기준일)",
+        key=date_key
+    )
+
+    # 기존 코드와 호환되도록 상태 유지
+    st.session_state.cal_base = base_day
 
     if c2.button("🔍 회의록에서 일정 추출", type="primary", use_container_width=True):
         if not current_meeting:
@@ -863,38 +1119,237 @@ elif page == PAGES[2]:
                     )
                     data = json.loads(response.output_text)
 
-                existing_keys = {(it["name"], it["due"]) for it in st.session_state.schedule}
-                added_count = 0
+                # ====================================================
+                # 기존 일정과 신규 추출 업무 비교
+                # ====================================================
+                # 자동으로 병합하지 않고 검토 대기 목록 생성
+                # 동일 회의록을 반복 분석하면 중복 생성 방지
+                # ====================================================
 
-                for kind, items in [("김 대리 업무", data["김대리업무"]), ("주요 일정", data["주요일정"])]:
-                    for item in items:
-                        # 구분 이름만 있는 빈 항목은 건너뛰기 (AI 출력 검증)
-                        if item["일정명"] in ("김 대리 업무", "주요 일정"):
-                            continue
+                source_hash = get_source_hash(
+                    current_meeting,
+                    base_day
+                )
 
-                        # AI가 추출한 일정명을 변수에 저장
-                        name = item["일정명"]
+                if "processed_meetings" not in st.session_state:
+                    st.session_state.processed_meetings = set()
 
-                        # "null" 글자도 기한 없음으로 처리
-                        expr = item["기한표현"] if item["기한표현"] not in (None, "", "null") else None
-                        days = item["기한일수"]
-                        # '출시 2주 전'처럼 다른 일정 기준 시점은 AI가 계산한 일수를 쓰지 않음
-                        if expr and re.search(r"\d+\s*(주|일)\s*전", expr):
-                            days = None
-                        due = calc_due(base_day, expr, days) or (base_day + timedelta(days=7))
-                        if (name, due) not in existing_keys:
-                            st.session_state.schedule.append({
-                                "name": name, "kind": kind, "expr": expr, "due": due,
-                                "use": True, "done": False, "source": st.session_state.active_doc
+                # 동일한 회의록의 중복 처리 방지
+                if source_hash in st.session_state.processed_meetings:
+
+                    st.info(
+                        "이미 분석하여 등록한 회의록입니다. "
+                        "기존 업무와 변경 이력을 확인해 주세요."
+                    )
+
+                else:
+
+                    pending = []
+
+                    for kind, items in [
+                        ("김 대리 업무", data["김대리업무"]),
+                        ("주요 일정", data["주요일정"])
+                    ]:
+
+                        for item in items:
+
+                            # 구분 이름만 있는 빈 항목은 건너뛰기
+                            if item["일정명"] in (
+                                "김 대리 업무",
+                                "주요 일정"
+                            ):
+                                continue
+
+                            name = item["일정명"]
+
+                            # 기존 기한 처리 규칙 유지
+                            expr = (
+                                item["기한표현"]
+                                if item["기한표현"] not in (
+                                    None, "", "null"
+                                )
+                                else None
+                            )
+
+                            days = item["기한일수"]
+
+                            if expr and re.search(
+                                r"\d+\s*(주|일)\s*전",
+                                expr
+                            ):
+                                days = None
+
+                            due = calc_due(
+                                base_day,
+                                expr,
+                                days
+                            )
+
+                            # 기존 업무와 유사한 후보 검색
+                            candidates = find_similar_tasks(
+                                name,
+                                st.session_state.schedule
+                            )
+
+                            # 신규 추출 결과를 검토 대기 목록에 저장
+                            pending.append({
+                                "name": name,
+                                "kind": kind,
+                                "expr": expr,
+                                "due": due,
+                                "source": st.session_state.active_doc,
+                                "meeting_date": base_day,
+                                "candidates": [
+                                    c["task"]["task_id"]
+                                    for c in candidates
+                                ]
                             })
-                            existing_keys.add((name, due))
-                            added_count += 1
 
-                st.session_state.sched_ver += 1
-                st.success(f"새로운 일정 {added_count}건이 중복 없이 캘린더에 누적 추가되었습니다!")
+                    st.session_state.pending_schedule = pending
+                    st.session_state.pending_source_hash = source_hash
+
+                    st.success(
+                        f"✅ {len(pending)}건의 업무를 추출했습니다. "
+                        "아래에서 신규 등록 또는 기존 업무 수정 여부를 확인해 주세요."
+                    )
+                    # 수정 : 아래와 # 신규 업무~사용자 확인 전까지 범위 삭제 해야 하는건지...?
             except Exception as e:
                 st.error(f"오류: {e}")
 
+    # ============================================================
+    # 신규 업무 / 기존 업무 수정 여부 사용자 확인
+    # ============================================================
+    # 유사한 업무가 있으면 기존 업무 수정을 우선 제안
+    # 사용자가 최종 확인해야만 일정에 반영
+    # ============================================================
+
+    pending = st.session_state.get(
+        "pending_schedule",
+        []
+    )
+
+    if pending:
+
+        st.markdown("### 🔎 신규 업무 및 변경사항 검토")
+
+        for idx, item in enumerate(pending):
+
+            with st.container(border=True):
+
+                st.markdown(
+                    f"**📌 {item['name']}**"
+                )
+
+                st.caption(
+                    f"회의일: {item['meeting_date']} | "
+                    f"마감일: {item['due'] or '미정'}"
+                )
+
+                # 기존 일정 중 유사 업무 후보 확인
+                candidates = [
+                    task
+                    for task in st.session_state.schedule
+                    if task["task_id"] in item["candidates"]
+                ]
+
+                # 유사 업무가 없으면 신규 업무로 등록
+                if not candidates:
+
+                    st.info(
+                        "기존 일정에서 유사한 업무를 찾지 못했습니다."
+                    )
+
+                    action = "신규 업무로 등록"
+
+                    selected_task = None
+
+                else:
+
+                    st.warning(
+                        "⚠️ 기존 업무와 유사한 일정이 발견되었습니다."
+                    )
+
+                    # 사용자에게 신규/수정 여부 선택 요청
+                    options = ["신규 업무로 등록"]
+
+                    options += [
+                        (
+                            f"기존 업무 수정: {task['name']} "
+                            f"(마감 {task['due']})"
+                        )
+                        for task in candidates
+                    ]
+
+                    selected_option = st.radio(
+                        "이 업무를 어떻게 처리하시겠습니까?",
+                        options,
+                        key=f"task_action_{idx}"
+                    )
+
+                    action = selected_option
+
+                    selected_task = None
+
+                    # 기존 업무 수정 선택 시 대상 업무 확인
+                    if selected_option != "신규 업무로 등록":
+
+                        selected_index = options.index(
+                            selected_option
+                        ) - 1
+
+                        selected_task = candidates[selected_index]
+
+                # 사용자가 확인한 경우에만 반영
+                if st.button(
+                    "✅ 확인 및 적용",
+                    key=f"confirm_task_{idx}"
+                ):
+
+                    if selected_task is None:
+
+                        new_task = create_schedule_task(
+                            item["name"],
+                            item["kind"],
+                            item["expr"],
+                            item["due"],
+                            item["source"],
+                            item["meeting_date"]
+                        )
+
+                        st.session_state.schedule.append(
+                            new_task
+                        )
+
+                        st.success("신규 업무가 등록되었습니다.")
+
+                    else:
+
+                        update_task_history(
+                            selected_task,
+                            item["due"],
+                            item["meeting_date"],
+                            item["source"]
+                        )
+
+                        st.success(
+                            "기존 업무가 수정되고 변경 이력이 저장되었습니다."
+                        )
+
+                    # 처리한 항목은 검토 대기 목록에서 제거
+                    st.session_state.pending_schedule.pop(idx)
+
+                    # 모든 항목 검토가 완료된 경우
+                    if not st.session_state.pending_schedule:
+
+                        st.session_state.processed_meetings.add(
+                            st.session_state.pending_source_hash
+                        )
+
+                    st.session_state.sched_ver += 1
+
+                    st.rerun()
+
+                    # 수정 : 들여쓰기가 잘 되어있는지 검토
     schedule = st.session_state.schedule
     ver = st.session_state.sched_ver
 
@@ -909,7 +1364,15 @@ elif page == PAGES[2]:
                 a, b, c, d = st.columns([1, 3, 2, 1], vertical_alignment="center")
                 it["use"] = a.checkbox("달력 표시", value=it["use"], key=f"use_{ver}_{i}")
                 b.markdown(f"**{it['name']}** ({it['kind']})  \n<small>출처: {it.get('source', '알 수 없음')}</small>", unsafe_allow_html=True)
-                it["due"] = c.date_input("마감일", value=it["due"], key=f"due_{ver}_{i}")
+                # 기한 미정 업무는 회의일 또는 오늘을 입력창의 초기값으로 제안
+                # 제안값은 확정 마감일이 아니며 사용자가 직접 확인해야 함
+                initial_due = it["due"] or it.get("meeting_date") or kst_today()
+
+                it["due"] = c.date_input(
+                    "마감일",
+                    value=initial_due,
+                    key=f"due_{ver}_{i}"
+                )
                 it["done"] = d.checkbox("완료", value=it["done"], key=f"done_{ver}_{i}")
 
         today = kst_today()
@@ -1060,10 +1523,6 @@ with st.expander("📱 휴대폰 캘린더 등록 방법"):
 
     ※ 기기와 캘린더 앱에 따라 가져오기 방법이 다를 수 있습니다.
     """)
-
-# 수정 : 삭제해야 하는지 모르겠슨..
-        else:
-            st.info("달력에 표시할 일정을 체크하면 캘린더 파일을 받을 수 있습니다.")
 
 # ══════════════════════════════════════════════════════════════
 # 메뉴 4: 팔로업 메일 초안 자동 생성 & 원클릭 승인
@@ -1442,23 +1901,147 @@ if page == PAGES[5]:
             st.caption("체크를 해제하면 미완료 목록으로 돌아가요.")
 
 # ══════════════════════════════════════════════════
-# 메뉴 7: 🗄️ 회의록 아카이브 (날짜/시간별 보존 및 조회)
+# 메뉴 7: 🗂️ 회의 자료실 (날짜/시간별 보존 및 조회)
 # ══════════════════════════════════════════════════
 elif page == PAGES[6]:
-    st.subheader("🗄️ 회의록 영구 아카이브 (날짜/시간별 기록실)")
-    st.caption("사이드바 작업 목록에서 회의록을 삭제하거나 교체하더라도, 업로드되었던 모든 회의록 원본과 등록 일시가 이곳에 안전하게 영구 보존됩니다.")
+    st.subheader("🗂️ 회의 자료실")
+    st.caption(
+        "업로드한 회의록을 조회하고, "
+        "현재 작업 문서로 불러오거나 삭제할 수 있습니다."
+    )
 
     archives = st.session_state.archived_meetings
     if not archives:
-        st.info("아직 저장된 회의록 아카이브가 없습니다.")
+        st.info("아직 저장된 회의 자가 없습니다.")
     else:
         st.markdown(f"**총 보존 회의록:** `{len(archives)}건`")
+        # ====================================================
+        # 회의 자료실: 문서 조회 / 불러오기 / 2단계 삭제
+        # ====================================================
+
         for idx, item in enumerate(reversed(archives), 1):
-            with st.expander(f"🕒 [{item['time']}] {item['title']}", expanded=(idx == 1)):
-                st.caption(f"등록 시각: {item['time']}")
-                st.text_area("회의록 원문", item["content"], height=200, key=f"arc_view_{idx}")
-                if st.button("📥 이 문서를 현재 작업 문서로 다시 불러오기", key=f"restore_{idx}"):
-                    st.session_state.uploaded_docs[item["title"]] = item["content"]
+
+            # 기존 아카이브 데이터에 고유 ID가 없는 경우 생성
+            if "document_id" not in item:
+                item["document_id"] = str(uuid.uuid4())
+
+            document_id = item["document_id"]
+
+            with st.expander(
+                f"🕒 [{item['time']}] {item['title']}",
+                expanded=(idx == 1)
+            ):
+
+                # 1. 문서 정보 표시
+                st.caption(
+                    f"등록 시각: {item['time']}"
+                )
+
+                st.text_area(
+                    "회의록 원문",
+                    item["content"],
+                    height=200,
+                    key=f"arc_view_{document_id}"
+                )
+
+                # 2. 현재 작업 문서로 불러오기
+                if st.button(
+                    "📥 이 문서를 현재 작업 문서로 다시 불러오기",
+                    key=f"restore_{document_id}"
+                ):
+
+                    st.session_state.uploaded_docs[
+                        item["title"]
+                    ] = item["content"]
+
                     st.session_state.active_doc = item["title"]
-                    st.success(f"'{item['title']}' 문서가 활성 작업 목록으로 복원되었습니다!")
+
+                    st.success(
+                        f"'{item['title']}' 문서를 불러왔습니다!"
+                    )
+
                     st.rerun()
+
+                # 3. 문서 삭제 관리
+                with st.expander("⚙️ 문서 관리"):
+
+                    # STEP 1: 삭제 요청
+                    if st.session_state.delete_target != document_id:
+
+                        if st.button(
+                            "🗑️ 문서 삭제",
+                            key=f"delete_request_{document_id}"
+                        ):
+
+                            st.session_state.delete_target = document_id
+
+                            st.rerun()
+
+                    # STEP 2: 최종 확인
+                    else:
+
+                        st.warning(
+                            "⚠️ 정말 이 문서를 삭제하시겠습니까?"
+                        )
+
+                        st.caption(
+                            "삭제하면 회의 자료실에서 제거됩니다."
+                        )
+
+                        col_cancel, col_delete = st.columns(2)
+
+                        # 삭제 취소
+                        with col_cancel:
+
+                            if st.button(
+                                "취소",
+                                key=f"cancel_{document_id}",
+                                use_container_width=True
+                            ):
+
+                                st.session_state.delete_target = None
+
+                                st.rerun()
+
+                        # 최종 삭제
+                        with col_delete:
+
+                            if st.button(
+                                "최종 삭제",
+                                key=f"confirm_delete_{document_id}",
+                                type="primary",
+                                use_container_width=True
+                            ):
+
+                                # 아카이브에서 해당 문서 삭제
+                                st.session_state.archived_meetings = [
+                                    doc
+                                    for doc in st.session_state.archived_meetings
+                                    if doc.get("document_id") != document_id
+                                ]
+
+                                # 현재 작업 목록에서도 해당 문서 제거
+                                st.session_state.uploaded_docs.pop(
+                                    item["title"],
+                                    None
+                                )
+
+                                # 삭제한 문서가 현재 작업 문서라면 변경
+                                if st.session_state.active_doc == item["title"]:
+
+                                    remaining = list(
+                                        st.session_state.uploaded_docs.keys()
+                                    )
+
+                                    st.session_state.active_doc = (
+                                        remaining[0]
+                                        if remaining
+                                        else ""
+                                    )
+
+                                # 삭제 확인 상태 초기화
+                                st.session_state.delete_target = None
+
+                                st.success("문서가 삭제되었습니다.")
+
+                                st.rerun()
