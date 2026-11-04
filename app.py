@@ -64,8 +64,9 @@ sys_role = """
 
 # ── 이메일 발송 함수 (미션 1) ──
 def send_email(to, subject, body):
-    sender = os.getenv("GMAIL_ADDRESS")
-    password = os.getenv("GMAIL_APP_PASSWORD")
+    # Streamlit Secrets에서 Gmail 발송 계정 정보 가져오기
+    sender = st.secrets.get("GMAIL_ADDRESS", os.getenv("GMAIL_ADDRESS"))
+    password = st.secrets.get("GMAIL_APP_PASSWORD", os.getenv("GMAIL_APP_PASSWORD"))
 
     # Secrets에 값이 없으면 연결 전에 바로 안내
     if not sender or not password:
@@ -293,8 +294,8 @@ with st.sidebar:
     # 회의록 업로드 (사이드바에 있어서 어느 메뉴에서든 올리고 바꿀 수 있음)
     st.subheader("📄 문서 업로드")
     uploaded_files = st.file_uploader(
-        "파일 업로드 (여러 개 가능: txt)", 
-        type=["txt"], 
+        "파일 업로드 (여러 개 가능: txt)",
+        type=["txt"],
         accept_multiple_files=True,
         label_visibility="collapsed"
     )
@@ -333,7 +334,7 @@ with st.sidebar:
     if st.session_state.uploaded_docs:
         st.divider()
         st.session_state.active_doc = st.selectbox(
-            "🎯 현재 작업 대상 문서 선택", 
+            "🎯 현재 작업 대상 문서 선택",
             list(st.session_state.uploaded_docs.keys()),
             index=list(st.session_state.uploaded_docs.keys()).index(st.session_state.active_doc) if st.session_state.active_doc in st.session_state.uploaded_docs else 0
         )
@@ -382,7 +383,7 @@ if page == PAGES[0]:
 
     # ── 오른쪽: 에이블과 실시간 대화 (음성 질문도 함께 표시) ──
     with col_right:
-        st.subheader(f"💬 '{st.session_state.active_doc}'전 실시간 대화")
+        st.subheader(f"💬 '{st.session_state.active_doc}' 실시간 대화")
         current_history = st.session_state.messages_dict.setdefault(st.session_state.active_doc, [])
         with st.container(height=480, border=True):
             if not current_history:
@@ -586,23 +587,23 @@ elif page == PAGES[1]:
         except Exception as e:
             st.error(f"오류가 발생했습니다: {e}")
 
-                            
+
     # ── ④ 시각화 대시보드: 지출 내역 & 목표 진행 상황] ──
     st.divider()
     st.markdown("### 📈 마케팅 지출 내역 및 목표 진행 상황 대시보드")
-    
+
     col_dash1, col_dash2 = st.columns([1, 1], gap="large")
 
     with col_dash1:
         st.markdown("#### 💰 마케팅 예산 지출 내역 (총 5,000만 원)")
         st.caption("회의록에 명시된 5천만 원 예산 배분 구성")
-        
+
         # 지출 데이터프레임
         df_expense = pd.DataFrame({
             "항목": ["SNS 광고 (인스타/유튜브)", "인플루언서 협업", "숏폼/카드뉴스 제작", "출시 프로모션 이벤트", "예비비"],
             "금액(백만원)": [25.0, 10.0, 8.0, 5.0, 2.0]
         })
-        
+
         # Streamlit 내장 도넛/파이 대용 시각화 및 지표
         c_tot1, c_tot2 = st.columns([1, 2])
         c_tot1.metric("총 집행 예산", "₩50M", delta="전체 100%")
@@ -612,7 +613,7 @@ elif page == PAGES[1]:
     with col_dash2:
         st.markdown("#### 🎯 김 대리 목표 진행 상황 (목표 달성률 %)")
         st.caption("배정된 3대 핵심 과업 및 출시 일정 기준 진행 현황")
-        
+
         df_goals = pd.DataFrame({
             "핵심 목표 및 마일스톤": [
                 "경쟁사 A사 온라인 마케팅 사례 분석",
@@ -623,7 +624,7 @@ elif page == PAGES[1]:
             ],
             "진행률(%)": [85, 60, 45, 30, 20]
         })
-        
+
         # 수평형 바 차트 형태로 진행률 시각화
         st.dataframe(
             df_goals,
@@ -832,7 +833,7 @@ if "briefing" not in st.session_state:
 
 # ── ⑥ 화면 ───────────────────────────────────────
 elif page == PAGES[2]:
-    st.subheader("📅 업무 캘린더")
+    st.subheader("📅 마감 캘린더")
     st.caption("회의록을 바꿔가며 일정을 추출해도, 기존 일정을 날리지 않고 중복 없이 누적하여 캘린더에 병합합니다.")
 
     # ① 일정 추출
@@ -864,6 +865,10 @@ elif page == PAGES[2]:
                         # 구분 이름만 있는 빈 항목은 건너뛰기 (AI 출력 검증)
                         if item["일정명"] in ("김 대리 업무", "주요 일정"):
                             continue
+
+                        # AI가 추출한 일정명을 변수에 저장
+                        name = item["일정명"]
+                        
                         # "null" 글자도 기한 없음으로 처리
                         expr = item["기한표현"] if item["기한표현"] not in (None, "", "null") else None
                         days = item["기한일수"]
@@ -1046,9 +1051,12 @@ followup_template = """
 
 [찾는 기준]
 - 참석자가 김 대리에게 넘겨주기로 한 자료, 또는 회의에서 그 참석자가 언급해 가장 잘 알고 있는 정보
-- 김 대리 업무 수행에 실제로 필요한 것만, 최대 3건
+- 김 대리 업무 수행에 실제로 필요한 자료와 정보를 담당자별로 모두 추출하세요.
+- 동일한 담당자에게 여러 자료를 요청해야 한다면 하나의 메일로 통합하세요.
+- 서로 다른 담당자에게 필요한 자료가 있다면 담당자별로 각각 메일 초안을 작성하세요.
 - 근거에는 회의록에서 그 참석자가 한 발언을 그대로 적으세요.
 - 회의록에 근거가 없는 요청은 만들지 마세요.
+- 선행 자료 요청이 필요하지 않은 참석자에게는 메일을 생성하지 마세요.
 
 [메일 작성 규칙]
 - 김 대리가 해당 참석자에게 보내는 메일입니다. 받는 사람 직함에 '님'을 붙여 정중하게 쓰세요.
@@ -1106,27 +1114,67 @@ if page == PAGES[3]:
         d["메일제목"] = st.text_input("제목", value=d["메일제목"], key=f"fu_sub_{ver}_{i}")
         d["메일본문"] = st.text_area("본문 (수정 가능)", value=d["메일본문"], height=200,
                                   key=f"fu_body_{ver}_{i}")
-        
-        col_s1, col_s2 = st.columns([1, 4])
-        with col_s1:
-            send_now = st.button("🚀 이메일 전송", key=f"fu_send_{ver}_{i}", type="primary")
 
-        if d["sent"]: #수정? : 이 바로 3줄 삭제하고, if send_now:를 넣을지 고민
-            st.success(f"📧 {d['sent']}(으)로 발송했습니다.")
-        elif st.button("✅ 승인하고 발송", key=f"fu_send_{ver}_{i}"):
+                  # ── 이메일 발송 버튼 ──
+        col_s1, col_s2 = st.columns([1, 4])
+
+        with col_s1:
+            send_now = st.button(
+                "🚀 이메일 전송",
+                key=f"fu_send_{ver}_{i}",
+                type="primary"
+            )
+
+        # 이메일 전송 버튼을 누른 경우에만 실제 발송
+        if send_now:
+
+            # 수신자 이메일 주소 확인
             if "@" not in d["to"]:
                 st.warning("받는 사람 이메일 주소를 확인해 주세요.")
+
             else:
                 with st.spinner("메일을 보내고 있습니다.."):
-                    result = send_email(d["to"], d["메일제목"], d["메일본문"])   # 미션 1 함수 재사용
-                if result["status"] == "success":
-                    t_str = datetime.now().strftime("%H:%M:%S")
-                    d.setdefault("logs", []).append(f"[{t_str}] 수신처: {d['to']} (발송 성공)")
-                    st.success("✅ 메일이 성공적으로 발송되었습니다! (필요시 내용을 수정해 다시 전송할 수 있습니다)")
-                else:
-                    st.error(f"발송 실패: {res.get('error')}")
 
-        if d.get("logs"):
+                    # 기존 미션 1의 이메일 발송 함수 재사용
+                    result = send_email(
+                        d["to"],
+                        d["메일제목"],
+                        d["메일본문"]
+                    )
+
+                # 실제 SMTP 발송 결과 확인
+                if result["status"] == "success":
+
+                    t_str = kst_now_str()
+
+                    # 발송 이력 저장
+                    d.setdefault("logs", []).append(
+                        f"[{t_str}] 수신처: {d['to']} (발송 성공)"
+                    )
+
+                    # 발송 완료 여부 저장
+                    d["sent"] = d["to"]
+
+                    st.success(
+                        f"✅ {d['to']} 주소로 이메일 전송이 완료되었습니다!"
+                    )
+
+                    st.info(
+                        "📩 메일 서버에 정상적으로 발송 요청이 접수되었습니다. "
+                        "실제 수신 여부는 수신자의 받은편지함에서 확인해 주세요."
+                    )
+
+                else:
+                    st.error(
+                        f"❌ 이메일 발송 실패: {result.get('error')}"
+                    )
+
+        # 이전 발송 이력이 있는 경우 표시
+        if d.get("sent"):
+            st.caption(f"📧 최근 발송 주소: {d['sent']}")
+
+#수정 : 이부분은 삭제할지 말지 &^^^^^
+                    if d.get("logs"):
             with st.expander("이 메일의 발송 이력"):
                 for log in d["logs"]:
                     st.caption(log)
@@ -1174,7 +1222,7 @@ elif page == PAGES[4]:
                     response = client.responses.create(
                         model="gpt-4o-mini",
                         input=[{"role": "system", "content": "김 대리의 비서 에이블로서 출근길 1분 라디오 뉴스 브리핑을 350자 내외로 정중하고 또렷하게 작성하세요."},
-                               {"role": "user", "content": f"[회의록]\n{meeting_text}"}],
+                               {"role": "user", "content": f"[회의록]\n{current_meeting}"}],
                         temperature=0
                     )
                     script = response.output_text
@@ -1184,7 +1232,6 @@ elif page == PAGES[4]:
                         model="tts-1",
                         voice=voice,
                         input=script,
-                        instructions="라디오 뉴스 앵커처럼 또렷하고 경쾌하게, 조금 빠른 속도로 읽어 주세요."
                     )
 
                 st.session_state.briefing = {"script": script, "audio": speech.content}
