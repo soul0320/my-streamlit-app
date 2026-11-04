@@ -3,6 +3,3 @@ openai==3.16.2
 pandas
 pypdf
 python-docx
-openpyxl
-xlrd
-pyhwp

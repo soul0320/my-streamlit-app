@@ -9,6 +9,27 @@ import uuid
 import hashlib
 from difflib import SequenceMatcher
 
+# ============================================================
+# 다양한 업무 문서 파일 형식 지원
+# ============================================================
+# TXT  : 일반 텍스트
+# PDF  : PDF 문서
+# Excel: XLSX, XLS, CSV
+# Word : DOCX
+# 한글 : HWPX, HWP
+# 음성 : MP3, WAV, M4A
+# ============================================================
+
+import io
+import zipfile
+import tempfile
+import subprocess
+import xml.etree.ElementTree as ET
+
+from pathlib import Path
+from pypdf import PdfReader
+from docx import Document
+
 import pandas as pd
 import streamlit as st
 from openai import OpenAI
@@ -284,6 +305,17 @@ if "last_audio" not in st.session_state:
 # 문서 업로드 및 문서별 대화 기록 초기화 (사이드바 실행 전에 필요)
 if "uploaded_docs" not in st.session_state:
     st.session_state.uploaded_docs = {}       # {문서명: 본문내용}
+# ============================================================
+# 업로드 위젯 및 삭제 확인 상태 관리
+# ============================================================
+
+# 파일 업로드 위젯 초기화 버전
+if "upload_widget_version" not in st.session_state:
+    st.session_state.upload_widget_version = 0
+
+# 삭제 확인 대기 문서
+if "sidebar_delete_target" not in st.session_state:
+    st.session_state.sidebar_delete_target = None
 if "active_doc" not in st.session_state:
     st.session_state.active_doc = ""          # 현재 선택한 문서
 if "archived_meetings" not in st.session_state:
@@ -309,7 +341,222 @@ def get_document_hash(content):
         content.encode("utf-8")
     ).hexdigest()
 
+# ============================================================
+# 다양한 파일 형식의 내용을 텍스트로 변환
+# ============================================================
+# 목적:
+# 사용자가 여러 종류의 마케팅 업무자료를 업로드하면
+# 파일 형식에 맞게 내용을 추출하여 AI 분석에 활용
+#
+# 지원:
+# TXT, CSV, PDF, XLSX, XLS, DOCX, HWPX
+# MP3, WAV, M4A
+#
+# HWP는 별도의 변환 도구가 필요할 수 있음
+# ============================================================
 
+def extract_file_content(uploaded_file):
+
+    # 1. 파일 확장자 확인
+    filename = uploaded_file.name
+    ext = Path(filename).suffix.lower()
+
+    # 2. 파일을 바이트 데이터로 읽기
+    file_bytes = uploaded_file.getvalue()
+
+    # ========================================================
+    # TXT 파일
+    # ========================================================
+    if ext == ".txt":
+
+        for encoding in ["utf-8-sig", "cp949", "euc-kr"]:
+
+            try:
+                return file_bytes.decode(encoding)
+
+            except UnicodeDecodeError:
+                continue
+
+        raise ValueError("TXT 파일의 문자 인코딩을 확인해 주세요.")
+
+    # ========================================================
+    # CSV 파일
+    # ========================================================
+    elif ext == ".csv":
+
+        for encoding in ["utf-8-sig", "cp949", "euc-kr"]:
+
+            try:
+                df = pd.read_csv(
+                    io.BytesIO(file_bytes),
+                    encoding=encoding
+                )
+                return df.to_csv(index=False)
+
+            except UnicodeDecodeError:
+                continue
+
+        raise ValueError("CSV 파일의 문자 인코딩을 확인해 주세요.")
+
+    # ========================================================
+    # PDF 파일
+    # ========================================================
+    elif ext == ".pdf":
+
+        reader = PdfReader(io.BytesIO(file_bytes))
+
+        pages = []
+
+        for i, page in enumerate(reader.pages):
+
+            page_text = page.extract_text() or ""
+
+            pages.append(
+                f"[페이지 {i + 1}]\n{page_text}"
+            )
+
+        return "\n\n".join(pages)
+
+    # ========================================================
+    # Excel 파일
+    # ========================================================
+    elif ext in [".xlsx", ".xls"]:
+
+        sheets = pd.read_excel(
+            io.BytesIO(file_bytes),
+            sheet_name=None
+        )
+
+        result = []
+
+        for sheet_name, df in sheets.items():
+
+            result.append(
+                f"[시트: {sheet_name}]\n"
+                + df.to_csv(index=False)
+            )
+
+        return "\n\n".join(result)
+
+    # ========================================================
+    # Word 파일
+    # ========================================================
+    elif ext == ".docx":
+
+        doc = Document(io.BytesIO(file_bytes))
+
+        paragraphs = [
+            p.text
+            for p in doc.paragraphs
+            if p.text.strip()
+        ]
+
+        # Word 문서의 표도 함께 읽기
+        for table in doc.tables:
+
+            for row in table.rows:
+
+                paragraphs.append(
+                    " | ".join(
+                        cell.text
+                        for cell in row.cells
+                    )
+                )
+
+        return "\n".join(paragraphs)
+
+    # ========================================================
+    # 한글 HWPX 파일
+    # ========================================================
+    elif ext == ".hwpx":
+
+        result = []
+
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+
+            section_files = sorted(
+                name
+                for name in z.namelist()
+                if name.startswith("Contents/section")
+                and name.endswith(".xml")
+            )
+
+            for section_name in section_files:
+
+                root = ET.fromstring(z.read(section_name))
+
+                texts = [
+                    element.text
+                    for element in root.iter()
+                    if element.tag.split("}")[-1] == "t"
+                    and element.text
+                ]
+
+                result.append("\n".join(texts))
+
+        if not result:
+            raise ValueError("HWPX 문서에서 본문을 찾지 못했습니다.")
+
+        return "\n\n".join(result)
+
+    # ========================================================
+    # 한글 HWP 파일
+    # ========================================================
+    elif ext == ".hwp":
+
+        # HWP 바이너리 파일은 HWPX와 내부 구조가 다름
+        # pyhwp의 hwp5txt 도구를 이용하여 텍스트 변환
+        with tempfile.TemporaryDirectory() as tmpdir:
+
+            path = Path(tmpdir) / "uploaded.hwp"
+            path.write_bytes(file_bytes)
+
+            try:
+                result = subprocess.run(
+                    ["hwp5txt", str(path)],
+                    capture_output=True,
+                    timeout=30,
+                    check=True
+                )
+
+            except FileNotFoundError:
+                raise ValueError(
+                    "HWP 변환 도구가 설치되지 않았습니다. "
+                    "pyhwp 설치를 확인하거나 HWPX로 변환해 주세요."
+                )
+
+            except subprocess.CalledProcessError:
+                raise ValueError(
+                    "HWP 파일 변환에 실패했습니다. "
+                    "파일 형식을 확인해 주세요."
+                )
+
+            return result.stdout.decode(
+                "utf-8",
+                errors="replace"
+            )
+
+    # ========================================================
+    # 음성 녹음 파일
+    # ========================================================
+    elif ext in [".mp3", ".wav", ".m4a"]:
+
+        # OpenAI Speech-to-Text API 사용
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=(filename, file_bytes)
+        )
+
+        return transcript.text
+
+    # ========================================================
+    # 지원하지 않는 파일 (파일별 처리 한계 : 구형 word, doc 파일은 지원x, .hwp-pyhwp 변환 도구가 정상 설치된 환경에서만 사용 가능, 녹음파일-OPENAI API의 파일 크기 제한이 있음)
+    # ========================================================
+    else:
+
+        raise ValueError(
+            f"지원하지 않는 파일 형식입니다: {ext}"
+        )
 
 # 사이드바 메뉴: 누른 메뉴의 기능만 화면에 표시
 with st.sidebar:
@@ -319,48 +566,211 @@ with st.sidebar:
 
     # 회의록 업로드 (사이드바에 있어서 어느 메뉴에서든 올리고 바꿀 수 있음)
     st.subheader("📄 문서 업로드")
+        # 지원하는 마케팅 업무자료 파일 형식
     uploaded_files = st.file_uploader(
-        "파일 업로드 (여러 개 가능: txt)",
-        type=["txt"],
+        "업무자료 업로드",
+        type=[
+            "txt", "csv",
+            "pdf",
+            "xlsx", "xls",
+            "docx",
+            "hwp", "hwpx",
+            "mp3", "wav", "m4a"
+        ],
         accept_multiple_files=True,
-        label_visibility="collapsed"
+        label_visibility="collapsed",
+        key=f"work_file_upload_{st.session_state.upload_widget_version}"
     )
 
+    # ============================================================
+    # 업로드한 문서의 내용 추출 및 작업 목록 등록
+    # ============================================================
+    # 1. 파일 형식별 텍스트 추출
+    # 2. 동일 파일 재등록 방지
+    # 3. 현재 작업 대상 문서 자동 선택
+    # 4. 추출 실패 시 오류 메시지 표시
+    # ============================================================
+
     if uploaded_files:
+
+        loaded_count = 0
+
         for uf in uploaded_files:
+
+            # 기존 작업 목록에 없는 파일만 추가
             if uf.name not in st.session_state.uploaded_docs:
-                content = uf.read().decode("utf-8", errors="ignore")
-                st.session_state.uploaded_docs[uf.name] = content
-                st.session_state.active_doc = uf.name
-                
-                # 아카이브에 날짜/시간별로 누적 저장 (삭제해도 아카이브에는 계속 남음!)
+
+                try:
+
+                    # 파일 형식별 텍스트 추출
+                    content = extract_file_content(uf)
+
+                    # 추출된 내용이 없는 경우
+                    if not content.strip():
+
+                        st.warning(
+                            f"'{uf.name}' 파일에서 "
+                            "분석할 텍스트를 찾지 못했습니다."
+                        )
+
+                        continue
+
+                    # 기존 작업 목록에 등록
+                    st.session_state.uploaded_docs[
+                        uf.name
+                    ] = content
+
+                    # 현재 작업 대상으로 선택
+                    st.session_state.active_doc = uf.name
+
+                    loaded_count += 1
+
+                except Exception as e:
+
+                    st.error(
+                        f"'{uf.name}' 파일 처리 오류: {e}"
+                    )
+
+        if loaded_count > 0:
+
+            st.success(
+                f"{loaded_count}개 파일 로드 완료!"
+            )
 
         st.success(f"{len(uploaded_files)}개 파일 로드 완료!")
 
-    st.markdown("#### 📑 등록된 문서 목록")
-    doc_keys = list(st.session_state.uploaded_docs.keys())
-    if not doc_keys:
-        st.caption("등록된 문서가 없습니다.")
-    else:
-        for dname in doc_keys:
-            c_doc, c_del = st.columns([4, 1])
-            is_active = (dname == st.session_state.active_doc)
-            prefix = "👉 " if is_active else "📄 "
-            c_doc.write(f"{prefix}**{dname}**")
-            # 개별 파일 취소/삭제 기능
-            if c_del.button("❌", key=f"del_{dname}", help="이 문서를 작업 목록에서 제거합니다 (아카이브에는 보존됨)"):
-                del st.session_state.uploaded_docs[dname]
-                if st.session_state.active_doc == dname:
-                    st.session_state.active_doc = list(st.session_state.uploaded_docs.keys())[0] if st.session_state.uploaded_docs else ""
-                st.rerun()
+    # ============================================================
+    # 현재 작업 대상 문서 선택 및 삭제
+    # ============================================================
+    # 기능:
+    # 1. 업로드한 문서 중 작업 대상 선택
+    # 2. 다른 문서로 변경
+    # 3. 선택한 문서 삭제 요청
+    # 4. 삭제 취소 또는 최종 삭제
+    #
+    # 주의:
+    # 작업 목록에서 삭제해도 회의 자료실의
+    # 보관 기록은 유지합니다.
+    # ============================================================
 
     if st.session_state.uploaded_docs:
+
         st.divider()
-        st.session_state.active_doc = st.selectbox(
-            "🎯 현재 작업 대상 문서 선택",
-            list(st.session_state.uploaded_docs.keys()),
-            index=list(st.session_state.uploaded_docs.keys()).index(st.session_state.active_doc) if st.session_state.active_doc in st.session_state.uploaded_docs else 0
+
+        st.subheader("🎯 현재 작업 대상 문서")
+
+        doc_names = list(
+            st.session_state.uploaded_docs.keys()
         )
+
+        # 현재 선택한 문서가 없으면 첫 번째 문서를 선택
+        if st.session_state.active_doc not in doc_names:
+            st.session_state.active_doc = doc_names[0]
+
+        # 1. 작업 대상 문서 선택
+        selected_doc = st.selectbox(
+            "작업할 문서를 선택하세요.",
+            doc_names,
+            index=doc_names.index(
+                st.session_state.active_doc
+            ),
+            key="active_document_selector"
+        )
+
+        # 선택 문서 변경
+        if selected_doc != st.session_state.active_doc:
+
+            st.session_state.active_doc = selected_doc
+
+            # 다른 문서를 선택하면 삭제 요청 취소
+            st.session_state.sidebar_delete_target = None
+
+            st.rerun()
+
+        # 2. 삭제 요청 버튼
+        if (
+            st.session_state.sidebar_delete_target
+            != selected_doc
+        ):
+
+            if st.button(
+                "🗑️ 선택한 문서 삭제",
+                key="sidebar_delete_request",
+                use_container_width=True
+            ):
+
+                st.session_state.sidebar_delete_target = (
+                    selected_doc
+                )
+
+                st.rerun()
+
+        # 3. 삭제 확인 단계
+        else:
+
+            st.warning(
+                f"⚠️ '{selected_doc}' 문서를 삭제하시겠습니까?"
+            )
+
+            col_cancel, col_delete = st.columns(2)
+
+            # 삭제 취소
+            with col_cancel:
+
+                if st.button(
+                    "취소",
+                    key="sidebar_delete_cancel",
+                    use_container_width=True
+                ):
+
+                    st.session_state.sidebar_delete_target = None
+
+                    st.rerun()
+
+            # 최종 삭제
+            with col_delete:
+
+                if st.button(
+                    "최종 삭제",
+                    key="sidebar_delete_confirm",
+                    use_container_width=True
+                ):
+
+                    # 작업 목록에서 선택 문서 제거
+                    st.session_state.uploaded_docs.pop(
+                        selected_doc,
+                        None
+                    )
+
+                    # 문서별 대화 기록도 작업 목록에서 제거
+                    st.session_state.messages_dict.pop(
+                        selected_doc,
+                        None
+                    )
+
+                    # 남은 문서 중 첫 번째 문서 선택
+                    remaining_docs = list(
+                        st.session_state.uploaded_docs.keys()
+                    )
+
+                    st.session_state.active_doc = (
+                        remaining_docs[0]
+                        if remaining_docs
+                        else ""
+                    )
+
+                    # 삭제 확인 상태 초기화
+                    st.session_state.sidebar_delete_target = None
+
+                    # 업로드 위젯 초기화
+                    # 삭제한 파일이 다시 자동 등록되는 현상 방지
+                    st.session_state.upload_widget_version += 1
+
+                    st.rerun()
+
+    else:
+
+        st.info("현재 등록된 작업 문서가 없습니다.")
 
     st.divider()
     active_history = st.session_state.messages_dict.get(st.session_state.active_doc, [])
@@ -1482,52 +1892,137 @@ if page == PAGES[2]:
                                type="primary", use_container_width=True)
             st.caption(f"마일스톤 {len(rows)}개(D-14, D-7, D-1, D-day)가 담깁니다. "
                        "파일을 열면 Google·Outlook·휴대폰 캘린더에 바로 등록됩니다.")
-# ============================================================
-# 외부 캘린더 바로가기
-# ============================================================
-# 기능:
-# 1. Google Calendar 바로 열기
-# 2. Outlook Calendar 바로 열기
-# 3. 휴대폰 캘린더 등록 방법 안내
-#
-# 주의:
-# 아래 버튼은 캘린더 웹페이지를 여는 기능입니다.
-# 일정 자동 등록 및 수정 동기화 기능은 아닙니다.
-# ============================================================
+    # ============================================================
+    # 외부 캘린더 연동 (마감 캘린더 메뉴 전용)
+    # ============================================================
+    # 기능:
+    # 1. 등록된 업무 중 캘린더에 추가할 업무 선택
+    # 2. Google Calendar 일정 등록 화면 열기
+    # 3. Outlook Calendar 일정 등록 화면 열기
+    # 4. 업무명 및 마감일 자동 입력
+    # 5. 사용자 확인 후 외부 캘린더에 저장
+    #
+    # 주의:
+    # 기존 업무 데이터와 .ics 다운로드 기능은 변경하지 않음
+    # ============================================================
 
-st.markdown("#### 🔗 외부 캘린더 바로가기")
+    from urllib.parse import urlencode
 
-col1, col2 = st.columns(2)
+    st.divider()
+    st.subheader("🔗 외부 캘린더 연동")
 
-with col1:
-    st.link_button(
-        "🔵 Google Calendar 열기",
-        "https://calendar.google.com/calendar/u/0/r",
-        use_container_width=True
+    st.caption(
+        "업무를 선택하면 해당 업무명과 마감일이 입력된 "
+        "Google·Outlook 캘린더 화면으로 이동합니다."
     )
 
-with col2:
-    st.link_button(
-        "🟣 Outlook Calendar 열기",
-        "https://outlook.live.com/calendar/",
-        use_container_width=True
-    )
+    # 1. 마감일이 확정된 업무만 선택 목록에 표시
+    calendar_tasks = [
+        task
+        for task in st.session_state.schedule
+        if task.get("due") is not None
+        and task.get("use", False)
+    ]
 
-# 휴대폰 캘린더 등록 안내
-with st.expander("📱 휴대폰 캘린더 등록 방법"):
+    if calendar_tasks:
 
-    st.markdown("""
-    **iPhone**
-    - ICS 파일을 다운로드합니다.
-    - 파일을 열어 캘린더로 가져올 수 있는지 확인합니다.
-    - 지원되지 않는 경우 연결된 캘린더 서비스에서 가져옵니다.
+        # 2. 캘린더에 등록할 업무 선택
+        selected_index = st.selectbox(
+            "📌 캘린더에 등록할 업무",
+            range(len(calendar_tasks)),
+            format_func=lambda i: (
+                f"{calendar_tasks[i]['name']} "
+                f"(마감: {calendar_tasks[i]['due']})"
+            ),
+            key="external_calendar_task"
+        )
 
-    **Android**
-    - Google Calendar 웹에서 ICS 파일을 가져옵니다.
-    - 휴대폰에서 같은 Google 계정으로 동기화합니다.
+        selected_task = calendar_tasks[selected_index]
 
-    ※ 기기와 캘린더 앱에 따라 가져오기 방법이 다를 수 있습니다.
-    """)
+        # 3. 선택한 업무 정보 가져오기
+        task_name = selected_task["name"]
+        task_due = selected_task["due"]
+
+        # 날짜를 YYYY-MM-DD 형식으로 변환
+        if isinstance(task_due, str):
+            task_due = date.fromisoformat(task_due[:10])
+
+        # 외부 캘린더에는 종일 일정으로 등록
+        start_date = task_due
+        end_date = task_due + timedelta(days=1)
+
+        # 4. 일정 상세 설명
+        task_description = (
+            f"업무명: {task_name}\n"
+            f"업무 구분: {selected_task.get('kind', '미정')}\n"
+            f"회의록: {selected_task.get('source', '미정')}\n"
+            f"회의일: {selected_task.get('meeting_date', '미정')}"
+        )
+
+        # ====================================================
+        # Google Calendar 등록 링크
+        # ====================================================
+        google_params = {
+            "action": "TEMPLATE",
+            "text": task_name,
+            "dates": (
+                f"{start_date:%Y%m%d}/"
+                f"{end_date:%Y%m%d}"
+            ),
+            "details": task_description
+        }
+
+        google_url = (
+            "https://calendar.google.com/calendar/render?"
+            + urlencode(google_params)
+        )
+
+        # ====================================================
+        # Outlook Calendar 등록 링크
+        # ====================================================
+        outlook_params = {
+            "path": "/calendar/action/compose",
+            "rru": "addevent",
+            "subject": task_name,
+            "startdt": start_date.isoformat(),
+            "enddt": end_date.isoformat(),
+            "allday": "true",
+            "body": task_description
+        }
+
+        outlook_url = (
+            "https://outlook.live.com/calendar/0/"
+            "deeplink/compose?"
+            + urlencode(outlook_params)
+        )
+
+        # 5. 외부 캘린더 연결 버튼
+        col_google, col_outlook = st.columns(2)
+
+        with col_google:
+            st.link_button(
+                "🔵 Google Calendar에 등록",
+                google_url,
+                use_container_width=True
+            )
+
+        with col_outlook:
+            st.link_button(
+                "🟣 Outlook Calendar에 등록",
+                outlook_url,
+                use_container_width=True
+            )
+
+        st.info(
+            "📅 외부 캘린더에서 일정 내용을 확인하거나 "
+            "수정한 후 저장해 주세요."
+        )
+
+    else:
+        st.info(
+            "마감일이 확정된 업무가 없습니다. "
+            "업무 일정을 먼저 등록해 주세요."
+        )
 
 # ══════════════════════════════════════════════════════════════
 # 메뉴 4: 팔로업 메일 초안 자동 생성 & 원클릭 승인
